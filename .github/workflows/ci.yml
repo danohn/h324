@@ -33,7 +33,8 @@ jobs:
         run: |
           uv venv .venv --python '${{ matrix.python }}'
           uv pip install --python .venv dist/*.whl pytest pytest-asyncio twine
-          echo "H324_TEST_PYTHON=$(uv python find --python .venv)" >> "$GITHUB_ENV"
+          H324_TEST_PYTHON=$(uv python find "$GITHUB_WORKSPACE/.venv")
+          echo "H324_TEST_PYTHON=$H324_TEST_PYTHON" >> "$GITHUB_ENV"
       - name: Test installed wheel outside checkout
         working-directory: ${{ runner.temp }}
         run: |
