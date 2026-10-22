@@ -11,6 +11,7 @@ import threading
 from pathlib import Path
 import serial
 from serial.tools import list_ports
+from h324.lifecycle import SERIAL_WRITE_TIMEOUT
 FAILURES = {"NO CARRIER", "BUSY", "NO DIALTONE", "NO DIAL TONE", "NO ANSWER", "ERROR"}
 MODES = {"V32B": (14400, 14400)}
 
@@ -30,7 +31,7 @@ class Modem:
         self.logfile = (directory / "modem.jsonl").open("w") if directory else None
         self.port = serial.Serial(port=None, baudrate=115200, bytesize=8,
                                   parity="N", stopbits=1, timeout=0,
-                                  write_timeout=3, rtscts=False, xonxoff=False,
+                                  write_timeout=SERIAL_WRITE_TIMEOUT, rtscts=False, xonxoff=False,
                                   dsrdtr=False, **({"exclusive": True} if os.name == "posix" else {}))
         self.port.port = device
         self.port.dtr = True

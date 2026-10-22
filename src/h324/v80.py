@@ -41,6 +41,7 @@ class Decoder:
     def __init__(self):
         self.pending = bytearray()
         self.ended = False
+        self.data_octets = 0
 
     def feed(self, chunk):
         self.pending.extend(chunk)
@@ -67,7 +68,8 @@ class Decoder:
             if len(self.pending) - i < 2 + count:
                 break
             params = bytes(self.pending[i + 2:i + 2 + count])
-            event = {'name': name, 'code': code, 'params_hex': params.hex()}
+            event = {'name': name, 'code': code, 'params_hex': params.hex(),
+                     'data_octet_offset': self.data_octets+len(data)}
             if name == 'rate':
                 event.update(tx_bps=RATES.get(params[0]), rx_bps=RATES.get(params[1]))
             if name in ('bnum', 'unum'):
@@ -76,6 +78,7 @@ class Decoder:
             self.ended = name == 'eot'
             i += 2 + count
         del self.pending[:i]
+        self.data_octets += len(data)
         return bytes(data), events
 
 

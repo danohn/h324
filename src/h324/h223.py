@@ -84,6 +84,7 @@ class PDU:
     information: bytes
     bit_offset: int = field(default=0, compare=False)
     discontinuity: bool = field(default=False, compare=False)
+    end_bit_offset: int = field(default=0, compare=False)
 
 
 def encode_pdu(pdu, xor_information=False):
@@ -134,6 +135,8 @@ class Framer:
         self.xor_information = xor_information
         self.buffer, self.offset, self.opening = '', 0, None
         self.errors = deque(maxlen=256)
+        self.error_count = 0
+        self.first_error_bit_offset = None
         self.counts = Counter()
         self.discontinuity = False
         if max_startup_bits < 64:
@@ -154,6 +157,9 @@ class Framer:
             self.startup_flag_run = 0
             return
         self.errors.append(dict(error=name, bit_offset=self.opening))
+        self.error_count += 1
+        if self.first_error_bit_offset is None:
+            self.first_error_bit_offset = self.opening if self.opening is not None else self.offset
         self.counts[name] += 1
         self.discontinuity = True
 
@@ -238,7 +244,8 @@ class Framer:
                         self.acquiring = False
                         self.startup_locked_offset = self.opening
                         self.counts['startup_acquired'] += 1
-                    output.append(PDU(mc, pm, info, self.opening, self.discontinuity))
+                    output.append(PDU(mc, pm, info, self.opening, self.discontinuity,
+                                      self.offset+i+8))
                     self.discontinuity = False
                     self.counts['pdus'] += 1
                 except ValueError as exc:

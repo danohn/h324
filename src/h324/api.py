@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import sys
 from typing import Any
+from h324.lifecycle import API_HANGUP_TIMEOUT, WORKER_SHUTDOWN_TIMEOUT
 
 PROTOCOL_VERSION = 1
 
@@ -102,11 +103,13 @@ class Call:
                 break
 
     def _disconnected(self, message: str) -> None:
+        self._disconnect_error = H324Error('Call disconnected: ' + message)
         if self._sender is not None and not self._sender.done():
-            self._disconnect_error = H324Error('Call disconnected: ' + message)
             self._sender.cancel()
 
     def _require_connected(self) -> None:
+        if self._disconnect_error is not None:
+            raise self._disconnect_error
         if not self._modem._active or self._modem._call is not self:
             raise H324Error('This call is no longer connected')
 
@@ -244,7 +247,7 @@ class AsyncModem:
                     if value.get('state') == 'error':
                         self._failure = H324Error(str(value.get('message', 'Call failed')))
                         self._connected.set()
-                if kind == 'error' and self._active and not self._connected.is_set():
+                if kind == 'error' and value.get('fatal', True) and self._active and not self._connected.is_set():
                     self._failure = H324Error(str(value.get('message', 'Call failed')))
                     self._connected.set()
                 if kind == 'closed':
@@ -342,9 +345,9 @@ class AsyncModem:
             return
         await self._command('hangup')
         try:
-            await asyncio.wait_for(self._idle.wait(), 15)
+            await asyncio.wait_for(self._idle.wait(), API_HANGUP_TIMEOUT)
         except asyncio.TimeoutError:
-            raise H324Error('Worker did not confirm modem restoration within 15 seconds') from None
+            raise H324Error(f'Worker did not confirm modem restoration within {API_HANGUP_TIMEOUT:g} seconds') from None
         finally:
             self._active = False
 
@@ -363,7 +366,7 @@ class AsyncModem:
             with contextlib.suppress(H324Error, BrokenPipeError, ConnectionResetError):
                 await self._command('shutdown')
             try:
-                await asyncio.wait_for(process.wait(), 18)
+                await asyncio.wait_for(process.wait(), WORKER_SHUTDOWN_TIMEOUT)
             except asyncio.TimeoutError:
                 process.terminate()
                 try:

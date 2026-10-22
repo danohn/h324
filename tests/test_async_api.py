@@ -19,6 +19,7 @@ for line in sys.stdin:
  op=c['op']
  if op in ('dial','listen'):
   emit('state',state='initializing',message='initializing')
+  if mode == 'recoverable': emit('error',message='recoverable validation',fatal=False)
   if mode == 'error': emit('error',message='permission denied')
   elif mode != 'cancel':
    emit('state',state='connected',message='connected')
@@ -26,6 +27,7 @@ for line in sys.stdin:
     for i in range(40): emit('media',lcn=1,payload='AAAA')
  elif op == 'live_start' and mode.startswith('disconnect_'):
   emit('state',state=mode[len('disconnect_'):],message='remote modem ended call')
+ elif op == 'send' and mode == 'recoverable': emit('error',message='invalid bundle',fatal=False)
  elif op == 'hangup': emit('state',state='idle',message='restored')
  elif op == 'shutdown':
   emit('closed')
@@ -82,6 +84,25 @@ async def test_connect_error_immediately_wakes_waiter(tmp_path):
         with pytest.raises(H324Error, match='permission denied'):
             await asyncio.wait_for(modem.dial('1'), 2)
     assert 'hangup' in commands(record)
+
+
+async def test_recoverable_validation_events_preserve_connected_call(tmp_path):
+    command, record = worker(tmp_path, 'recoverable')
+    async with AsyncModem(ModemConfig('COM3'), worker_command=command) as modem:
+        call = await modem.dial('1')
+        await call.send_bundle('synthetic invalid bundle')
+        seen = []
+        async for event in call.events():
+            if event.kind == 'error':
+                seen.append(event)
+                assert event.data['fatal'] is False
+                call._require_connected()
+            if len(seen) == 2:
+                break
+        assert modem._failure is None
+        assert modem._active
+        await call.hangup()
+    assert commands(record) == ['dial', 'send', 'stop_media', 'hangup', 'shutdown']
 
 
 async def test_early_worker_eof_fails_context_without_call(tmp_path):

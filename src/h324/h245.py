@@ -160,10 +160,44 @@ class Endpoint:
         self._opening = False
         self._mux_sent = False
         self._ready_emitted = False
+        self.closing = self._close_started = False
+        self.end_sent = self.end_received = False
+        self.close_requests = {}
 
     @property
     def ready(self):
-        return not self.failure and self.local_capabilities_acked and self.remote_capabilities and self.msd_acked and self.role is not None and self.tx_channels == {1, 2} and self.rx_channels == {1, 2} and set(self.tx_entries) == {1, 2} and set(self.rx_entries) == {1, 2}
+        return not self.closing and not self.failure and self.local_capabilities_acked and self.remote_capabilities and self.msd_acked and self.role is not None and self.tx_channels == {1, 2} and self.rx_channels == {1, 2} and set(self.tx_entries) == {1, 2} and set(self.rx_entries) == {1, 2}
+
+    @property
+    def close_complete(self):
+        return self._close_started and not self.tx_channels
+
+    def begin_close(self, now):
+        """Close owned outgoing channels after the application drains media."""
+        if self._close_started or self.end_sent or self.end_received:
+            return Update()
+        self.closing = self._close_started = True
+        self.pending.clear()
+        outgoing = []
+        for channel in (2, 1):
+            if channel not in self.tx_channels:
+                continue
+            request = 'requestChannelClose' if channel == 2 and self.role == 'slave' else 'closeLogicalChannel'
+            value = {'forwardLogicalChannelNumber': channel}
+            if request == 'closeLogicalChannel':
+                value['source'] = ('user', None)
+            outgoing.append(encode(pdu('request', request, value)))
+            self.close_requests[channel] = request
+            self.pending[f'close{channel}'] = now+self.timeout
+        return Update(outgoing=tuple(outgoing))
+
+    def end_session(self):
+        if self.end_sent:
+            return Update()
+        self.closing = self.end_sent = True
+        self.pending.clear()
+        return Update(outgoing=(encode(pdu('command', 'endSessionCommand', ('disconnect', None))),),
+                      events=(Event('end_session_sent'),))
 
     @property
     def deadline(self):
@@ -175,6 +209,8 @@ class Endpoint:
         return Update(events=(Event('failure'),), failure=reason)
 
     def start(self, now):
+        if self.end_sent or self.end_received:
+            return Update()
         if self.started:
             return Update(failure=self.failure)
         self.started = True
@@ -189,6 +225,8 @@ class Endpoint:
         return self._fail('H.245 timeout: '+','.join(expired)) if expired else Update()
 
     def _progress(self, now, outgoing, events):
+        if self.closing:
+            return
         if self.remote_capabilities and self.local_capabilities_acked and self.msd_acked and self.role and not self._opening:
             self._opening = True
             for channel in ((1, 2) if self.role == 'master' else (1,)):
@@ -235,6 +273,15 @@ class Endpoint:
         except (ValueError, asn1tools.Error) as exc:
             return self._fail(str(exc))
         outgoing, events = [], []
+        if category == 'command' and name == 'endSessionCommand':
+            if value != ('disconnect', None):
+                return self._fail('unsupported end-session mode')
+            self.closing = self.end_received = True
+            self.pending.clear()
+            return Update(events=(Event('end_session_received'),))
+        if self.end_sent or self.end_received:
+            # SRP remains live, but no further H.245 is transmitted after End.
+            return Update()
         # Reliable SRP normally removes duplicates; cached requests make replay safe.
         if category == 'request':
             identity = (name, value.get('sequenceNumber', value.get('forwardLogicalChannelNumber', 0)))
@@ -245,7 +292,28 @@ class Endpoint:
                 return Update(outgoing=reply)
             if len(self.requests) >= 32:
                 return self._fail('H.245 request cache capacity exceeded')
-            if name == 'terminalCapabilitySet':
+            if name == 'closeLogicalChannel':
+                channel = value['forwardLogicalChannelNumber']
+                if value.get('source') != ('user', None) or channel not in self.rx_channels or channel == 2 and self.role != 'slave':
+                    return self._fail('invalid logical-channel close')
+                self.closing = True
+                self.rx_channels.discard(channel)
+                if channel == 2:
+                    self.tx_channels.discard(2)
+                    self.pending.pop('close2', None)
+                events.append(Event('peer_closing', channel=channel))
+                outgoing.append(encode(pdu('response', 'closeLogicalChannelAck',
+                                           {'forwardLogicalChannelNumber': channel})))
+            elif name == 'requestChannelClose':
+                channel = value['forwardLogicalChannelNumber']
+                if (channel != 2 or self.role != 'master' or
+                        channel not in self.tx_channels and not (self.closing and channel in self.tx_entries)):
+                    return self._fail('invalid bidirectional-channel close request')
+                self.closing = True
+                events.append(Event('peer_closing', channel=channel))
+                outgoing.append(encode(pdu('response', 'requestChannelCloseAck',
+                                           {'forwardLogicalChannelNumber': channel})))
+            elif name == 'terminalCapabilitySet':
                 seq = value['sequenceNumber']
                 if not self._supports_remote(value):
                     reply = pdu('response', 'terminalCapabilitySetReject', {'sequenceNumber': seq, 'cause': ('unspecified', None)})
@@ -296,7 +364,21 @@ class Endpoint:
         elif category == 'response':
             if name.endswith('Reject'):
                 return self._fail(f'peer rejected {name}: {value.get("cause", value)}')
-            if name == 'terminalCapabilitySetAck':
+            if name in ('closeLogicalChannelAck', 'requestChannelCloseAck'):
+                channel = value['forwardLogicalChannelNumber']
+                expected = 'requestChannelClose' if name == 'requestChannelCloseAck' else 'closeLogicalChannel'
+                if not self.closing or self.close_requests.get(channel) != expected:
+                    return self._fail('unsolicited channel-close acknowledgement')
+                if f'close{channel}' not in self.pending and channel not in self.tx_channels:
+                    return Update()  # Crossed CLC can finish before its earlier RCC ACK.
+                if name == 'closeLogicalChannelAck':
+                    self.tx_channels.discard(channel)
+                    if channel == 2:
+                        self.rx_channels.discard(2)
+                    self.pending.pop(f'close{channel}', None)
+                elif channel != 2 or self.role != 'slave':
+                    return self._fail('unexpected request-channel-close acknowledgement')
+            elif name == 'terminalCapabilitySetAck':
                 if value['sequenceNumber'] != 0:
                     return self._fail('unexpected capability acknowledgement sequence')
                 self.local_capabilities_acked = True

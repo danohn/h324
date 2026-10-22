@@ -47,6 +47,8 @@ class Link:
         self.high_water = 0
         self.last_decoded = b''
         self.active_underruns = 0
+        self.current_pdu_end_bit = None
+        self.first_pdu_end_bit = None
 
     @property
     @_tx_synchronized
@@ -92,20 +94,31 @@ class Link:
     def feed(self, raw):
         data, events = self.decoder.feed(raw)
         self.last_decoded = data
+        pending_under = []
         for event in events:
             if event['name']=='under' and self.pdu_counts:
                 self.active_underruns += 1
+            elif event['name'] == 'under':
+                pending_under.append(event)
             self.status.append(event)
             self.log('v80_status',**event)
         # Drive higher layers before decoding the next PDU: an H.245 message may
         # activate the very table entry used by the following PDU in this read.
         for pdu in self.framer.feed(data):
+            self.current_pdu_end_bit = pdu.end_bit_offset
+            if self.first_pdu_end_bit is None:
+                self.first_pdu_end_bit = pdu.end_bit_offset
             self.pdu_counts[pdu.mc] += 1
             self.phases[pdu.bit_offset % 8] += 1
             self.log('h223_pdu',mc=pdu.mc,pm=pdu.pm,bytes=len(pdu.information),
                      bit_offset=pdu.bit_offset,discontinuity=pdu.discontinuity)
             for sdu in self.demux.feed(pdu):
                 yield sdu
+        # V.80 controls can follow the first valid PDU within the same USB read.
+        # Preserve that order rather than calling every initial read pre-active.
+        if self.first_pdu_end_bit is not None:
+            self.active_underruns += sum(event['data_octet_offset']*8 >= self.first_pdu_end_bit
+                                        for event in pending_under)
 
     @_tx_synchronized
     def summary(self):
@@ -113,6 +126,8 @@ class Link:
             rx_open_channels=sorted(self.demux.open_channels),pdu_codes=dict(self.pdu_counts),
             bit_phases=dict(self.phases),status_counts=dict(Counter(s['name'] for s in self.status)),
             statuses=self.status,mux_counts=dict(self.framer.counts),mux_errors=list(self.framer.errors),
+            mux_error_count=self.framer.error_count,
+            first_mux_error_bit_offset=self.framer.first_error_bit_offset,
             demux_counts=dict(self.demux.counts),demux_events=list(self.demux.events),
             partial_sdu_bytes={str(k):len(v) for k,v in self.demux.partial.items()},
             queue_high_water_bytes=self.high_water,queued_bytes=self.queued_bytes,

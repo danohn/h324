@@ -7,6 +7,7 @@ from dataclasses import asdict
 from collections import Counter, deque
 import math
 from h324.api import MediaChunk
+from h324.lifecycle import SESSION_CLOSE_TIMEOUT
 
 from h324.h223 import Slot, al2_decode, al2_encode
 from h324.link import Link
@@ -44,10 +45,16 @@ class StreamingSession:
         self.video_resume_at = 0
         self.video_tokens = 900.0
         self.video_token_time = 0
+        self.closing = self.close_ready = False
+        self.close_phase = None
+        self.close_deadline = self.close_drained_at = None
+        self.close_outcome = None
+        self.end_sent_at = None
+        self.end_received_bit_boundary = None
 
     @property
     def ready(self):
-        return self.h245.ready and not self.failure
+        return self.h245.ready and not self.closing and not self.failure
 
     @property
     def media_active(self):
@@ -75,6 +82,13 @@ class StreamingSession:
             elif event.kind in ('rx_entry_install', 'tx_entry_install'):
                 table = self.link.rx_table if event.kind.startswith('rx') else self.link.tx_table
                 table.install(event.entry, [Slot(lcn, count) for lcn, count in event.elements])
+            elif event.kind in ('peer_closing', 'end_session_received'):
+                if event.kind == 'end_session_received' and self.end_received_bit_boundary is None:
+                    end = self.link.current_pdu_end_bit
+                    if end is not None:
+                        # A closing flag can also open the next candidate PDU.
+                        self.end_received_bit_boundary = end-8
+                self.begin_close(now)
         if update.failure:
             self._fail('H.245: ' + update.failure)
         for payload in update.outgoing:
@@ -82,6 +96,59 @@ class StreamingSession:
         if self.ready and not self.ready_announced:
             self.ready_announced = True
             self.emit(event='state', state='connected', message='Audio and video channels ready')
+
+    def begin_close(self, now, timeout=SESSION_CLOSE_TIMEOUT):
+        if not math.isfinite(timeout) or timeout <= 0 or not math.isfinite(now):
+            raise ValueError('Close timeout must be finite and positive')
+        if self.closing:
+            return
+        self.closing = True
+        self.close_phase = 'media_drain'
+        self.close_deadline = now+timeout
+        self.live = False
+        self.source = None  # Already admitted complete pictures remain queued.
+        self.pause_start = None
+        self.emit(event='state', state='hanging_up', message='Ending the multimedia session')
+
+    def _close_tick(self, now):
+        if self.close_ready:
+            return
+        if now >= self.close_deadline:
+            self.close_ready = True
+            self.close_outcome = 'timeout'
+            self.emit(event='log', message='Graceful session close timed out; restoring modem')
+            return
+        if self.h245.end_received and not self.h245.end_sent and self.close_phase != 'reply_drain':
+            self.close_phase = 'reply_drain'
+            self.close_drained_at = None
+        if self.close_phase in ('media_drain', 'reply_drain', 'end_drain'):
+            if self.link.pending or self.close_phase == 'end_drain' and not self.srp.idle:
+                self.close_drained_at = None
+                return
+            if self.close_drained_at is None:
+                self.close_drained_at = now
+            if now-self.close_drained_at < self.drain_allowance:
+                return
+            if self.close_phase == 'end_drain':
+                # A disconnect need not await peer EndSession (H.324 7.6), but
+                # permit its optional reply briefly for coordinated cleardown.
+                if not self.h245.end_received and now-self.end_sent_at < 2:
+                    return
+                self.close_ready = True
+                self.close_outcome = 'peer_end_received' if self.h245.end_received else 'end_delivered'
+            elif self.close_phase == 'reply_drain':
+                self._h245_update(self.h245.end_session(), now)
+                self.end_sent_at = now
+                self.close_phase = 'end_drain'
+                self.close_drained_at = None
+            else:
+                self._h245_update(self.h245.begin_close(now), now)
+                self.close_phase = 'channels'
+        if self.close_phase == 'channels' and self.h245.close_complete and self.srp.idle:
+            self._h245_update(self.h245.end_session(), now)
+            self.end_sent_at = now
+            self.close_phase = 'end_drain'
+            self.close_drained_at = None
 
     def start(self, now):
         if self.started:
@@ -249,6 +316,9 @@ class StreamingSession:
         try:
             self._srp_update(self.srp.tick(now), now)
             self._h245_update(self.h245.tick(now), now)
+            if self.closing:
+                self._close_tick(now)
+                return
             if self.live and self.video_suspended and now >= self.video_resume_at and self.link.queued_bytes < 256:
                 self.video_suspended = False
                 self.video_tokens = min(900.0, self.video_tokens + max(0, now-self.video_token_time)*600)
@@ -282,5 +352,21 @@ class StreamingSession:
     def summary(self):
         return dict(failure=self.failure, ready=self.ready, role=self.h245.role,
                     drain_allowance_seconds=self.drain_allowance,
+                    close=dict(phase=self.close_phase, ready=self.close_ready,
+                               outcome=self.close_outcome, end_sent=self.h245.end_sent,
+                               end_received=self.h245.end_received,
+                               received_end_bit_boundary=self.end_received_bit_boundary,
+                               termination_tail_errors=self.termination_tail_errors),
                     counts=dict(self.counts), srp_counts=dict(self.srp.counts),
                     al3_counts=dict(self.al3_tx.counts), transport=self.link.summary())
+
+    @property
+    def termination_tail_errors(self):
+        framer = self.link.framer
+        boundary = self.end_received_bit_boundary
+        carrier_ended_earlier = boundary is not None and any(
+            event['name'] in ('eot', 'dcd_off') and event.get('data_octet_offset', -1)*8 < boundary
+            for event in self.link.status)
+        if boundary is not None and not carrier_ended_earlier and framer.error_count and framer.first_error_bit_offset >= boundary:
+            return framer.error_count
+        return 0

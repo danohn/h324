@@ -173,7 +173,7 @@ flags followed by a structurally valid, nonempty MC0 control PDU. Rejected
 acquisition candidates are recorded separately in the `acquisition` events and
 `transport.startup_acquisition` summary. The first accepted PDU immediately
 locks strict framing, including for any later error in the same USB read.
-Post-lock framing errors remain fatal. The ordinary `Framer()` API retains its
+Post-lock framing errors during an active session remain fatal. The ordinary `Framer()` API retains its
 strict behavior unless `startup_hunt=True` is explicitly requested.
 
 Acquisition fails after **five seconds of wall time or 72,000 received bits**,
@@ -291,5 +291,60 @@ capture files. A blocked write is cancelled through the serial adapter, with
 port closure as a final bounded fallback. If the thread still cannot join, the
 worker reports failed cleanup, refuses further calls and exits nonzero without
 reusing the writer's resources. Short serial writes, active V.80 underruns,
-framing errors and overruns remain fatal. Timing models and unit tests do not
+active-session framing errors and overruns remain fatal. Timing models and unit tests do not
 replace physical call acceptance.
+
+## Graceful call termination
+
+Local hangup first emits `hanging_up` and stops admitting new source media.
+Already queued whole pictures and SDUs drain, including the transport's nominal
+0.6-second delivery allowance. H.245 then closes the local outgoing audio
+channel and the bidirectional video channel. The video opener (master) sends
+`CloseLogicalChannel`; the slave sends `RequestChannelClose` to its owner and
+waits for the actual close. Crossed close requests are handled idempotently.
+Logical-channel acknowledgements precede `EndSessionCommand(disconnect)`.
+No new H.245 message is sent after the local EndSession; SRP acknowledgements
+and retransmission remain transport operations.
+
+The peer emits `hanging_up` as soon as a channel-close request or valid received
+EndSession starts termination. Upon received disconnect it drains admitted
+media and sends the optional EndSession reply. This follows
+[H.324 (04/2009),7.6–7.7](https://www.itu.int/rec/dologin_pub.asp?id=T-REC-H.324-200904-I%21%21PDF-E&lang=e&type=items):
+the disconnect receiver may perform step3, and the initiator can clear without
+requiring a peer EndSession. The worker permits a bounded two-second reply
+opportunity, then uses the documented drain allowance before EOT/restoration.
+The no-further-H.245 rule applies after **sending** one's own EndSession,
+as specified in [H.245,B.13.4](https://www.itu.int/rec/dologin_pub.asp?id=T-REC-H.245-200510-S%21%21PDF-E&lang=e&type=items).
+
+Graceful phases have an eight-second overall limit. A nonresponding peer causes
+an explicit `close.outcome="timeout"` fallback to modem restoration; it is not
+reported as a completed negotiation. `StreamingSession.begin_close(now,
+timeout=8)` accepts finite supplied clock values and a finite positive timeout.
+One shared 12-second cleanup budget covers transmitter stop, EOT and every AT
+restoration command/sleep, rather than restarting a four-second budget for each
+AT command. A serial write already in progress has its existing three-second
+timeout. Budget expiry always closes the port and reports restoration
+unconfirmed, with `cleanup_timed_out`, budget and elapsed fields. Shared values
+are defined in `h324.lifecycle`; unchanged normal AT responses remain fast.
+The async API's 25-second idle wait covers eight seconds of graceful phases,
+12 seconds of cleanup, one three-second write and two seconds of margin.
+Context exit waits 28 seconds before its terminate fallback; the client uses
+the shared 30-second GUI worker shutdown limit. These outer process fallbacks
+are still needed for an unresponsive OS driver. Initialization cancellation
+still interrupts modem setup immediately through the existing IPC check.
+
+Physical carrier loss may produce malformed H.223 tail bits after a valid
+received EndSession. Those are retained and counted separately in
+`session.close.termination_tail_errors`, with the received End's delivering-PDU
+bit boundary. A framing error earlier than that boundary remains fatal, even
+in the same serial read or after bounded error-history rollover. A carrier-end
+status preceding that boundary cannot enable this exception. Demultiplexer,
+codec CRC/sequence and V.80 active-underrun/overrun errors remain fatal. This is
+protocol-end classification, not error repair or cryptographic authentication.
+
+Queued obsolete source commands are counted and discarded during teardown and
+after that call's cleanup. The next explicit call resets this latch. IPC error
+events include `fatal`: recoverable command or bundle validation uses `False`;
+session/transport failure uses `True` and announces `hanging_up` before the
+error. Clients should stop capture on terminal state and preserve an active
+call on `fatal=False`. Missing flags retain the legacy fatal interpretation.

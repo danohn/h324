@@ -28,6 +28,7 @@ from h324.api import PROTOCOL_VERSION, ModemProfile
 from h324.activity import CallActivity
 from h324.timing import PacerMetrics, TransmitClock, CollectionMetrics
 from h324.transmit import DataTransmitter, scheduling_self_test
+from h324.lifecycle import CLEANUP_BUDGET
 
 
 class NullCapture:
@@ -124,8 +125,13 @@ class Worker:
         self.files = {}
         self.state = 'idle'
         self.shutdown_requested = False
+        self.shutdown_after_close = False
+        self.discard_stale_media = False
+        self.stale_media_commands = 0
         self.fatal_transmit_stop = False
         self.cleanup_mode = False
+        self.cleanup_deadline = None
+        self.cleanup_timed_out = False
         self.connected_at = self.last_tx = self.last_rx = None
         self.tx_bytes = self.rx_bytes = 0
         self.rate = None
@@ -164,10 +170,20 @@ class Worker:
             event['payload'] = base64.b64encode(payload).decode('ascii')
         elif event['event'] == 'state':
             self.state = event['state']
+            if self.state == 'hanging_up':
+                self.discard_stale_media = True
+        elif event['event'] == 'error':
+            if self.modem is not None:
+                self.set_state('hanging_up', 'Call failed; restoring the modem')
+                self.discard_stale_media = True
+            event['fatal'] = True
         self.emit(**event)
 
     def _check_cancel(self):
         if self.cleanup_mode:
+            if self.cleanup_deadline is not None and time.monotonic() >= self.cleanup_deadline:
+                self.cleanup_timed_out = True
+                raise TimeoutError('Modem restoration exceeded the shared cleanup budget')
             return
         if self.shutdown_requested or self.ipc_overload:
             raise Cancelled()
@@ -219,6 +235,8 @@ class Worker:
             directory.mkdir(parents=True, exist_ok=False)
         self.directory = directory
         self.call_generation += 1
+        self.discard_stale_media = False
+        self.stale_media_commands = 0
         self.last_error = None
         self.rate = self.last_rate_status = self.connected_at = None
         self.next_send = None
@@ -307,6 +325,7 @@ class Worker:
         self.rx_bytes += len(decoded)
         if decoded:
             self.last_rx = now
+        terminal_status = None
         for status in self.session.link.status[old:]:
             if status['name'] == 'rate':
                 self.last_rate_status = status
@@ -317,7 +336,7 @@ class Worker:
                 elif self.rate != 14400:
                     raise RuntimeError(f'Unsupported actual modem rate {self.rate}; this profile requires 14,400 bps')
             elif status['name'] in ('eot', 'dcd_off'):
-                raise Cancelled('Remote modem ended the call')
+                terminal_status = status
             elif status['name'] in ('abort', 'frame_error', 'tover', 'rover', 'unknown'):
                 raise RuntimeError('V.80 transport error: ' + status['name'])
         if getattr(self, 'acquisition_deadline', None) is not None:
@@ -332,10 +351,16 @@ class Worker:
                 raise TimeoutError('H.223 startup acquisition did not lock within five seconds')
         if self.session.link.active_underruns:
             raise RuntimeError('Synchronous transmit underrun; call stopped to avoid corrupt playback')
-        if self.session.link.framer.errors or self.session.link.demux.events:
+        framer = self.session.link.framer
+        if ((framer.error_count and not self.session.termination_tail_errors) or
+                self.session.link.demux.events):
             raise RuntimeError('H.223 framing or channel reassembly error')
         if self.session.failure:
             raise RuntimeError(self.session.failure)
+        if terminal_status is not None:
+            self.emit(event='remote_carrier_end', **terminal_status,
+                      received_end_bit_boundary=self.session.end_received_bit_boundary)
+            raise Cancelled('Remote modem ended the call')
 
     def _serial_snapshot(self):
         result = {}
@@ -427,9 +452,18 @@ class Worker:
     def _command(self, command):
         op = command['op']
         now = time.monotonic()
+        if self.discard_stale_media and op in ('live_start', 'live_chunk', 'live_stop', 'send', 'pause', 'resume', 'stop_media'):
+            self.stale_media_commands += 1
+            return
         if op in ('shutdown', 'hangup'):
-            self.shutdown_requested |= op == 'shutdown'
-            if self.modem is not None:
+            if self.modem is not None and self.session is not None and (self.state == 'connected' or self.session.closing):
+                self.shutdown_after_close |= op == 'shutdown'
+                self.discard_stale_media = True
+                self.session.begin_close(now)
+            else:
+                self.shutdown_requested |= op == 'shutdown'
+                self.discard_stale_media = True
+            if self.modem is not None and not (self.session is not None and self.session.closing):
                 raise Cancelled()
         elif op in ('dial', 'listen'):
             self._initialize(command)
@@ -496,7 +530,11 @@ class Worker:
                 self.set_state('error', error)
             return
         self.set_state('hanging_up', 'Hanging up and restoring the modem')
+        self.discard_stale_media = True
         self.cleanup_mode = True
+        cleanup_started = time.monotonic()
+        self.cleanup_deadline = cleanup_started+CLEANUP_BUDGET
+        self.cleanup_timed_out = False
         retain_resources = False
         try:
             # EOT is in-band modem control, followed by proven DTR/AT restoration.
@@ -505,6 +543,7 @@ class Worker:
             if transmitter_stopped:
                 if self.modem.state == 'data':
                     with contextlib.suppress(Exception):
+                        self._check_cancel()
                         self.modem.send(b'\x19\xba')
                 restore_close(self.modem)
             else:
@@ -517,8 +556,14 @@ class Worker:
                               not getattr(self.modem, 'restore_failed', False))
             if not cleanup_ok:
                 error = (error + '; ' if error else '') + 'Modem idle/profile restoration was not confirmed'
+            if self.cleanup_timed_out:
+                error = (error + '; ' if error else '') + 'Shared cleanup deadline expired'
             self._release_activity()
             result = dict(station=self.station, error=error, cleanup_ok=cleanup_ok,
+                          cleanup_timed_out=self.cleanup_timed_out,
+                          cleanup_budget_seconds=CLEANUP_BUDGET,
+                          cleanup_elapsed_seconds=time.monotonic()-cleanup_started,
+                          stale_media_commands=self.stale_media_commands,
                           timing=self.timing.summary(history=True), gc=self.gc_metrics.summary(history=True),
                           transmit_owner=self.transmitter_report,
                           activity=self.activity_report,
@@ -539,11 +584,14 @@ class Worker:
             self.connected_at = None
             self.call_generation += 1
             self.cleanup_mode = False
+            self.cleanup_deadline = None
             # A completed bundle load from the former call cannot enter a new one.
             if self.bundle_loading:
                 self.bundle_loading = False
             self.set_state('error' if error else 'idle', error or 'Call closed; modem ready')
             self.telemetry(time.monotonic())
+            if self.shutdown_after_close:
+                self.shutdown_requested = True
 
     def run(self):
         self.set_state('initializing', 'Loading conferencing protocols')
@@ -566,7 +614,10 @@ class Worker:
                         try:
                             self._command(command)
                         except (ValueError, KeyError) as exc:
-                            self.emit(event='error', message=str(exc))
+                            fatal = command['op'] in ('dial', 'listen') and not owned_before_command
+                            if fatal:
+                                self.set_state('hanging_up', 'Call setup failed; restoring the modem')
+                            self.emit(event='error', message=str(exc), fatal=fatal)
                             if command['op'] in ('dial', 'listen') and not owned_before_command:
                                 self._cleanup(str(exc))
                     if self.modem is not None:
@@ -590,6 +641,8 @@ class Worker:
                             if self.session.failure:
                                 raise RuntimeError(self.session.failure)
                             self._check_transmitter()
+                            if self.session.close_ready:
+                                self._cleanup()
                     try:
                         generation, sdus, manifest, load_error = self.bundle_result.get_nowait()
                     except queue.Empty:
@@ -598,7 +651,7 @@ class Worker:
                         if self.bundle_loading and generation == self.call_generation:
                             self.bundle_loading = False
                             if load_error:
-                                self.emit(event='error', message='Cannot load prepared movie: ' + load_error)
+                                self.emit(event='error', message='Cannot load prepared movie: ' + load_error, fatal=False)
                             elif self.session is not None and self.session.ready:
                                 self.session.send_media(sdus, manifest['duration_ms'], time.monotonic(),
                                                         manifest.get('title', manifest.get('source_name', 'Movie')))
@@ -609,7 +662,10 @@ class Worker:
                 except Cancelled:
                     self._cleanup()
                 except Exception as exc:
-                    self.emit(event='error', message=str(exc))
+                    if self.modem is not None:
+                        self.set_state('hanging_up', 'Call failed; restoring the modem')
+                        self.discard_stale_media = True
+                    self.emit(event='error', message=str(exc), fatal=True)
                     self._cleanup(str(exc))
                 time.sleep(.002 if self.modem else .02)
         finally:
