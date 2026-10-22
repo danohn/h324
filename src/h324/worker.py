@@ -163,6 +163,8 @@ class Worker:
                 if command['op'] in ('hangup', 'shutdown'):
                     self.shutdown_requested |= command['op'] == 'shutdown'
                     raise Cancelled()
+                if len(self.deferred) >= 100:
+                    raise BufferError('Bounded command queue exceeded during modem initialization')
                 self.deferred.append(command)
         except queue.Empty:
             pass
@@ -377,6 +379,7 @@ class Worker:
                           tx_bytes=self.tx_bytes, rx_bytes=self.rx_bytes, rate=self.rate,
                           last_rate_status=self.last_rate_status, negotiation=self.negotiation,
                           session=self.session.summary() if self.session else None)
+            self.emit(event='cleanup', **result)
             if self.directory:
                 (self.directory / 'results.json').write_text(json.dumps(result, indent=2) + '\n')
         finally:

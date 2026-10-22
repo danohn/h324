@@ -64,3 +64,16 @@ def test_ipc_slow_consumer_still_restores_modem(monkeypatch):
     assert len(restored) == 1
     assert worker.modem is None
     assert worker.ipc_overload
+
+
+def test_cleanup_event_without_recording(monkeypatch):
+    events = []
+    worker = Worker('test', lambda **event: events.append(event))
+    worker.modem = SimpleNamespace(state='data', send=lambda data: None)
+    def restore(modem): modem.cleanup_ok = True
+    monkeypatch.setattr(worker_module, 'restore_close', restore)
+    worker._cleanup()
+    cleanup = next(e for e in events if e['event'] == 'cleanup')
+    assert cleanup['cleanup_ok'] is True and cleanup['error'] is None
+    assert worker.directory is None
+    assert events.index(cleanup) < next(i for i,e in enumerate(events) if e.get('state') == 'idle')

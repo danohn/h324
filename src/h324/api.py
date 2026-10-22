@@ -6,6 +6,7 @@ telephone connection. Applications must consume events while transmitting.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import base64
 from collections.abc import AsyncIterable, AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -42,8 +43,10 @@ class ModemConfig:
     def __post_init__(self) -> None:
         if not isinstance(self.port, str) or not self.port.strip():
             raise ValueError('An explicit serial port is required')
-        if self.profile != ModemProfile.CX93001_V80_14400:
-            raise ValueError('Unsupported modem profile')
+        try:
+            object.__setattr__(self, 'profile', ModemProfile(self.profile))
+        except ValueError:
+            raise ValueError('Unsupported modem profile') from None
         if not 5 <= self.timeout <= 180:
             raise ValueError('Call timeout must be between 5 and 180 seconds')
 
@@ -70,6 +73,8 @@ class MediaChunk:
             raise ValueError('Audio requires one 24-byte G.723.1 6.3 kbit/s frame')
         if self.lcn == 2 and (len(self.payload) > 4096 or not self.payload.startswith(b'\x00\x00') or len(self.payload) < 3 or self.payload[2] & 0xfc != 0x80):
             raise ValueError('Video requires one complete baseline H.263 picture of at most 4096 bytes')
+        if self.lcn == 2 and any(self.payload[i:i+2] == b'\x00\x00' and self.payload[i+2] & 0xfc == 0x80 for i in range(1, len(self.payload)-2)):
+            raise ValueError('Pass one complete H.263 picture per chunk')
 
 
 @dataclass(frozen=True)
@@ -95,7 +100,12 @@ class Call:
             if event.kind == 'closed' or event.kind == 'state' and event.data.get('state') in ('idle', 'error'):
                 break
 
+    def _require_connected(self) -> None:
+        if not self._modem._active or self._modem._call is not self:
+            raise H324Error('This call is no longer connected')
+
     async def send(self, source: AsyncIterable[MediaChunk], *, label: str = 'Live media') -> None:
+        self._require_connected()
         if self._send_active:
             raise H324Error('A media source is already active')
         self._send_active = True
@@ -113,16 +123,22 @@ class Call:
             self._send_active = False
             self._sender = None
             if self._modem._process is not None and self._modem._process.returncode is None:
-                await asyncio.shield(self._modem._command('live_stop'))
+                # Preserve a source/worker exception; cleanup must not replace it
+                # with a secondary broken pipe. Context exit still owns teardown.
+                with contextlib.suppress(H324Error, BrokenPipeError, ConnectionResetError):
+                    await asyncio.shield(self._modem._command('live_stop'))
 
     async def send_bundle(self, directory: str | Path) -> None:
+        self._require_connected()
         await self._modem._command('send', bundle=str(directory))
 
     async def pause(self) -> None:
+        self._require_connected()
         self._resume_gate.clear()
         await self._modem._command('pause')
 
     async def resume(self) -> None:
+        self._require_connected()
         self._resume_gate.set()
         await self._modem._command('resume')
 
@@ -131,11 +147,13 @@ class Call:
             self._sender.cancel()
             await asyncio.gather(self._sender, return_exceptions=True)
         self._resume_gate.set()
-        await self._modem._command('stop_media')
+        if self._modem._active and self._modem._call is self:
+            await self._modem._command('stop_media')
 
     async def hangup(self) -> None:
         await self.stop()
-        await self._modem._hangup()
+        if self._modem._call is self:
+            await self._modem._hangup()
 
 
 class AsyncModem:
@@ -161,10 +179,13 @@ class AsyncModem:
         self._failure: H324Error | None = None
         self._active = False
         self._closing = False
+        self._call: Call | None = None
 
     async def __aenter__(self) -> AsyncModem:
         if self._process is not None:
             raise H324Error('Modem context is already open')
+        if self._closing:
+            raise H324Error('A closed AsyncModem context cannot be reopened')
         self._process = await asyncio.create_subprocess_exec(*self.worker_command, '--station', self.config.station,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             limit=65536)
@@ -283,7 +304,8 @@ class AsyncModem:
                 raise self._failure
             if not self._active:
                 raise H324Error('Call ended during connection')
-            return Call(self)
+            self._call = Call(self)
+            return self._call
         except BaseException:
             await asyncio.shield(self._hangup())
             raise
@@ -313,6 +335,9 @@ class AsyncModem:
             return
         self._closing = True
         try:
+            if self._call is not None:
+                with contextlib.suppress(H324Error, BrokenPipeError, ConnectionResetError):
+                    await self._call.stop()
             await self._command('shutdown')
             try:
                 await asyncio.wait_for(process.wait(), 18)
@@ -330,3 +355,4 @@ class AsyncModem:
             await asyncio.gather(*(t for t in (self._reader, self._stderr_reader) if t is not None), return_exceptions=True)
             self._active = False
             self._process = None
+            self._call = None

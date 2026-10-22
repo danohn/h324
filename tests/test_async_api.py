@@ -59,7 +59,7 @@ async def test_call_send_pause_stop_hangup_and_context_shutdown(tmp_path):
     ops = commands(record)
     assert ops[:3] == ['dial', 'live_start', 'live_chunk']
     assert 'pause' in ops and 'resume' in ops and 'live_stop' in ops
-    assert ops[-2:] == ['hangup', 'shutdown']
+    assert 'hangup' in ops and ops[-1] == 'shutdown'
 
 
 async def test_cancel_during_initialization_waits_for_restore(tmp_path):
@@ -123,3 +123,24 @@ def test_public_input_validation():
     with pytest.raises(ValueError): MediaChunk(1, b'bad')
     with pytest.raises(ValueError): MediaChunk(2, b'not h263')
     assert ModemConfig('COM255').port == 'COM255'
+
+
+async def test_context_exit_cancels_active_source(tmp_path):
+    command, record = worker(tmp_path)
+    async with AsyncModem(ModemConfig('COM3'), worker_command=command) as modem:
+        call = await modem.dial('1')
+        started = asyncio.Event()
+        async def source():
+            started.set()
+            await asyncio.Event().wait()
+            if False:
+                yield None
+        task = asyncio.create_task(call.send(source()))
+        await started.wait()
+    assert task.cancelled()
+    assert commands(record)[-1] == 'shutdown'
+
+
+def test_profile_string_is_normalized():
+    config = ModemConfig('COM3', profile='cx93001-v80-14400')
+    assert config.profile.value == 'cx93001-v80-14400'
