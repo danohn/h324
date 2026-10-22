@@ -6,8 +6,8 @@ manufacturer's H.324 terminal.
 
 ## Automated software checks
 
-The [core matrix run](https://github.com/danohn/h324/actions/runs/39719024612)
-passed **191 tests per job** against installed wheels on all twelve combinations
+The [core matrix run](https://github.com/danohn/h324/actions/runs/39719761953)
+passed **199 tests per job** against installed wheels on all twelve combinations
 of Python 3.11, 3.12, 3.13 and 3.14 with Ubuntu 24.04, macOS 15 and Windows 2022.
 Checks run outside the source checkout. The library environment includes neither
 Qt nor FFmpeg. CLI startup, worker startup and the installed H.245 resource are
@@ -18,7 +18,7 @@ The extracted projects retain the portable application/protocol tests; historica
 V.34 experiments, PBX utilities and capture-analysis diagnostics remain in that
 archive. Test totals across the new projects must not be described as a direct
 replacement of all 191 historical tests. The current core total consists of 141
-migrated tests and 50 new tests; its equality to the archive total is coincidental.
+migrated tests and 58 new tests.
 
 ## Physical macOS check
 
@@ -46,6 +46,22 @@ V.80 in-band rates and initial AT carrier reports are distinct evidence. An
 unspecified in-band rate stays unknown. The separately named `carrier_report`
 requires consistent `+MCR`, `+MRR` and `CONNECT` result codes; it never uses the
 requested modem configuration as a measurement.
+
+A subsequent sustained physical file/camera call delivered 9,377 live audio
+frames before a local transmit underrun, with the peer detecting damaged framing
+afterward. Both modems restored successfully. This failed the ten-minute hardware
+criterion and publishing was stopped before upload. The initial acquisition fix
+and successful short file/API calls do not establish sustained pacing reliability;
+that issue is being investigated separately.
+
+A second sustained attempt with a per-call macOS `NSProcessInfo` activity guard
+failed after approximately 254 seconds of live capture. Both in-band and initial
+AT reports identified 14,400 bps in both directions. Bounded timing evidence
+showed clustered host/USB delays immediately before the underrun, including
+44 ms and 51 ms loop gaps and increasing transmit deadline debt. Both modems
+restored successfully. The guard was independently observed active, so this
+result does not establish App Nap as the cause or the guard as a pacing fix.
+The host-time buffer estimate is not a measurement of modem buffer occupancy.
 
 ## Installed async API physical check
 
