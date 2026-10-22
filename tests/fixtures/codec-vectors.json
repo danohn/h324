@@ -1,0 +1,82 @@
+[
+  {
+    "name": "terminalCapabilitySet",
+    "hex": "027000060008817500014140040004000078000180000032000040000119a0382f0000800001000000000001",
+    "tshark_decoded_name": "terminalCapabilitySet"
+  },
+  {
+    "name": "masterSlaveDetermination",
+    "hex": "0100800001",
+    "tshark_decoded_name": "masterSlaveDetermination"
+  },
+  {
+    "name": "openLogicalChannel",
+    "hex": "030000000d00001180",
+    "tshark_decoded_name": "openLogicalChannel"
+  },
+  {
+    "name": "openLogicalChannel",
+    "hex": "0340000108d01c002f012a801000a4680e002f0055100080",
+    "tshark_decoded_name": "openLogicalChannel"
+  },
+  {
+    "name": "multiplexEntrySend",
+    "hex": "060000180000000001c40000000280",
+    "tshark_decoded_name": "multiplexEntrySend"
+  },
+  {
+    "name": "terminalCapabilitySetAck",
+    "hex": "218000",
+    "tshark_decoded_name": "terminalCapabilitySetAck"
+  },
+  {
+    "name": "masterSlaveDeterminationAck",
+    "hex": "2080",
+    "tshark_decoded_name": "masterSlaveDeterminationAck"
+  },
+  {
+    "name": "masterSlaveDeterminationAck",
+    "hex": "20a0",
+    "tshark_decoded_name": "masterSlaveDeterminationAck"
+  },
+  {
+    "name": "openLogicalChannelAck",
+    "hex": "22800000",
+    "tshark_decoded_name": "openLogicalChannelAck"
+  },
+  {
+    "name": "openLogicalChannelAck",
+    "hex": "22a00001000001",
+    "tshark_decoded_name": "openLogicalChannelAck"
+  },
+  {
+    "name": "multiplexEntrySendAck",
+    "hex": "2500001010",
+    "tshark_decoded_name": "multiplexEntrySendAck"
+  },
+  {
+    "name": "terminalCapabilitySetReject",
+    "hex": "22000000",
+    "tshark_decoded_name": "terminalCapabilitySetReject"
+  },
+  {
+    "name": "masterSlaveDeterminationReject",
+    "hex": "2100",
+    "tshark_decoded_name": "masterSlaveDeterminationReject"
+  },
+  {
+    "name": "openLogicalChannelReject",
+    "hex": "2300000050",
+    "tshark_decoded_name": "openLogicalChannelReject"
+  },
+  {
+    "name": "multiplexEntrySendReject",
+    "hex": "2580000020",
+    "tshark_decoded_name": "multiplexEntrySendReject"
+  },
+  {
+    "name": "openLogicalChannelConfirm",
+    "hex": "64000001",
+    "tshark_decoded_name": "openLogicalChannelConfirm"
+  }
+]

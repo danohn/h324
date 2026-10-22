@@ -1,0 +1,97 @@
+name: Publish Python release
+on:
+  workflow_dispatch:
+    inputs:
+      publish_pypi:
+        description: Publish to PyPI after TestPyPI verification (requires a version tag)
+        default: false
+        type: boolean
+permissions:
+  contents: read
+jobs:
+  tests:
+    uses: ./.github/workflows/ci.yml
+  build:
+    runs-on: ubuntu-24.04
+    needs: tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - uses: astral-sh/setup-uv@v6
+      - name: Build and audit immutable release distributions
+        run: |
+          uv run --no-project scripts/audit_release.py --source .
+          uv build --out-dir dist
+          uv run --no-project scripts/audit_release.py dist/*
+          uv run --no-project --with twine python -m twine check dist/*
+      - name: Require matching version tag for production
+        if: inputs.publish_pypi
+        env:
+          RELEASE_REF: ${{ github.ref }}
+        run: |
+          uv run --no-project python - <<'PY'
+          import os, pathlib, tomllib
+          version = tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version']
+          if os.environ['RELEASE_REF'] != 'refs/tags/v' + version:
+              raise SystemExit('Production publishing requires the matching vVERSION tag')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-distributions
+          path: dist/*
+          if-no-files-found: error
+  testpypi:
+    runs-on: ubuntu-24.04
+    needs: build
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/h324
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-distributions
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+  verify-testpypi:
+    runs-on: ubuntu-24.04
+    needs: testpypi
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-distributions
+          path: dist
+      - name: Retrieve exact wheel from TestPyPI and compare bytes
+        run: uv run --no-project scripts/verify_index.py --index https://test.pypi.org dist/*.whl
+      - name: Install retrieved wheel and test outside checkout
+        run: |
+          uv venv .venv --python 3.14
+          uv pip install --python .venv verified-index/*.whl
+          cd "$RUNNER_TEMP"
+          uv run --no-project --python "$GITHUB_WORKSPACE/.venv" python "$GITHUB_WORKSPACE/scripts/installed_check.py" --checkout "$GITHUB_WORKSPACE"
+  pypi:
+    if: inputs.publish_pypi
+    runs-on: ubuntu-24.04
+    needs: verify-testpypi
+    environment:
+      name: pypi
+      url: https://pypi.org/p/h324
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-distributions
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1

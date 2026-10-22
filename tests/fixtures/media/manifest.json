@@ -1,0 +1,55 @@
+{
+  "profile": {
+    "audio_codec": "g723_1",
+    "audio_bit_rate": 6300,
+    "audio_sample_rate": 8000,
+    "audio_channels": 1,
+    "audio_frame_ms": 30,
+    "audio_al": "al2WithoutSequenceNumbers",
+    "video_codec": "h263",
+    "video_width": 128,
+    "video_height": 96,
+    "video_fps": 2,
+    "video_al": "al3",
+    "video_control_octets": 1,
+    "video_send_buffer": 1024
+  },
+  "duration_ms": 6000,
+  "verification": {
+    "audio_samples": 48000,
+    "audio_sample_rate": 8000,
+    "decoded_pcm_sha256": "9b8df3ffb2b51977058336888ed0b22fbd64441352f0b3cb31ac2174e397206a",
+    "decoded_audio_nonzero": true,
+    "decoded_video_frames": 12,
+    "unique_decoded_video_frames": 11
+  },
+  "budget": {
+    "duration_ms": 6000,
+    "codec_bytes": 5359,
+    "al_sdus": 215,
+    "mux_pdus": 236,
+    "exact_stuffed_media_bits": 51068,
+    "media_wire_bps": 8511.333333333334,
+    "per_codec_wire_bps": {
+      "g723_1": 7522.166666666667,
+      "h263": 989.1666666666666
+    },
+    "line_bps": 14400,
+    "control_reserve_bps": 1000,
+    "remaining_bps": 4888.666666666666,
+    "fits_average_budget": true,
+    "offline_fifo_max_completion_lateness_ms": 236.11111111111111,
+    "offline_fifo_final_completion_ms": 5985.625,
+    "limitations": "No ARQ, actual H.245 traffic, codec execution or host/USB timing in this model"
+  },
+  "files": {
+    "audio.g723": {
+      "bytes": 4800,
+      "sha256": "8a250cb39d8891c9775cc6e7e9a92e31c812dfe69c6fb331ac122ac404cfd663"
+    },
+    "video.h263": {
+      "bytes": 559,
+      "sha256": "f8a7dbb7004aadd30267a9660888e7699bf8813b6865fa30a87a416bab9bbd17"
+    }
+  }
+}

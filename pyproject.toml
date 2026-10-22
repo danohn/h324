@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "h324"
+version = "0.1.0a1"
+description = "Experimental H.324 dial-up multimedia protocol and asynchronous modem library"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+authors = [{name = "Daniel Ohnesorge"}]
+classifiers = ["Development Status :: 3 - Alpha", "Operating System :: OS Independent", "Programming Language :: Python :: 3.11", "Programming Language :: Python :: 3.12", "Programming Language :: Python :: 3.13", "Programming Language :: Python :: 3.14"]
+dependencies = ["asn1tools>=0.167,<0.168", "pyserial>=3.5,<4"]
+
+[project.urls]
+Homepage = "https://github.com/danohn/h324"
+Issues = "https://github.com/danohn/h324/issues"
+
+[project.scripts]
+h324 = "h324.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "build>=1.2", "twine>=6"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/h324"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["ignore::DeprecationWarning:asn1tools.*", "ignore::DeprecationWarning:pyparsing.*"]

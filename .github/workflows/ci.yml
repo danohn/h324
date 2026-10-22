@@ -1,0 +1,48 @@
+name: Tests and distributions
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2022]
+        python: ['3.11', '3.12', '3.13', '3.14']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: astral-sh/setup-uv@v6
+      - name: Audit public source and build both distributions
+        run: |
+          uv run --no-project scripts/audit_release.py --source .
+          uv build --out-dir dist
+          uv run --no-project scripts/audit_release.py dist/*
+      - name: Install wheel and test dependencies
+        run: |
+          uv venv .venv --python '${{ matrix.python }}'
+          uv pip install --python .venv dist/*.whl pytest pytest-asyncio twine
+          echo "H324_TEST_PYTHON=$(uv python find --python .venv)" >> "$GITHUB_ENV"
+      - name: Test installed wheel outside checkout
+        working-directory: ${{ runner.temp }}
+        run: |
+          uv run --no-project --python "$H324_TEST_PYTHON" python "$GITHUB_WORKSPACE/scripts/installed_check.py" --checkout "$GITHUB_WORKSPACE"
+          uv run --no-project --python "$H324_TEST_PYTHON" python -m pytest "$GITHUB_WORKSPACE/tests" --import-mode=importlib -q -W ignore::DeprecationWarning
+          uv run --no-project --python "$H324_TEST_PYTHON" python -m twine check "$GITHUB_WORKSPACE"/dist/*
+      - uses: actions/upload-artifact@v4
+        if: matrix.os == 'ubuntu-24.04' && matrix.python == '3.14'
+        with:
+          name: python-distributions
+          path: dist/*
+          if-no-files-found: error
