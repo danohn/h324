@@ -13,8 +13,9 @@ import io
 
 
 class DelayedPair:
-    def __init__(self):
+    def __init__(self, delay=.5):
         self.now = 0
+        self.delay = delay
         self.events = [[], []]
         self.endpoints = [StreamingSession(lambda _i=i, **e: self.events[_i].append(e),
             status_number=i+1, drain_allowance=.6) for i in range(2)]
@@ -31,7 +32,7 @@ class DelayedPair:
         self.now += .02
         for index, session in enumerate(self.endpoints):
             session.tick(self.now)
-            self.wire[1-index].append((self.now+.5, shield(session.link.pull(36))))
+            self.wire[1-index].append((self.now+self.delay, shield(session.link.pull(36))))
         for index, incoming in enumerate(self.wire):
             while incoming and incoming[0][0] <= self.now:
                 self.endpoints[index].feed(incoming.popleft()[1], self.now)
@@ -42,8 +43,9 @@ class DelayedPair:
 
 
 @pytest.mark.parametrize('initiator', [0, 1])
-def test_both_channel_owners_end_without_truncating_admitted_video(initiator):
-    pair = DelayedPair()
+@pytest.mark.parametrize('delay', [.5, .65])
+def test_both_channel_owners_end_without_truncating_admitted_video(initiator, delay):
+    pair = DelayedPair(delay)
     picture = b'\0\0\x80'+bytes(range(100))*3
     for session in pair.endpoints:
         session.start_live(pair.now)
@@ -53,7 +55,7 @@ def test_both_channel_owners_end_without_truncating_admitted_video(initiator):
     sender.begin_close(pair.now)
     assert not sender.ready
     assert pair.events[initiator][-1]['state'] == 'hanging_up'
-    for _ in range(450):
+    for _ in range(550):
         pair.step()
         if all(s.close_ready for s in pair.endpoints):
             break

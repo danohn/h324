@@ -316,20 +316,20 @@ opportunity, then uses the documented drain allowance before EOT/restoration.
 The no-further-H.245 rule applies after **sending** one's own EndSession,
 as specified in [H.245,B.13.4](https://www.itu.int/rec/dologin_pub.asp?id=T-REC-H.245-200510-S%21%21PDF-E&lang=e&type=items).
 
-Graceful phases have an eight-second overall limit. A nonresponding peer causes
+Graceful phases have a ten-second overall limit. A nonresponding peer causes
 an explicit `close.outcome="timeout"` fallback to modem restoration; it is not
 reported as a completed negotiation. `StreamingSession.begin_close(now,
-timeout=8)` accepts finite supplied clock values and a finite positive timeout.
+timeout=10)` accepts finite supplied clock values and a finite positive timeout.
 One shared 12-second cleanup budget covers transmitter stop, EOT and every AT
 restoration command/sleep, rather than restarting a four-second budget for each
 AT command. A serial write already in progress has its existing three-second
 timeout. Budget expiry always closes the port and reports restoration
 unconfirmed, with `cleanup_timed_out`, budget and elapsed fields. Shared values
 are defined in `h324.lifecycle`; unchanged normal AT responses remain fast.
-The async API's 25-second idle wait covers eight seconds of graceful phases,
+The async API's 27-second idle wait covers ten seconds of graceful phases,
 12 seconds of cleanup, one three-second write and two seconds of margin.
-Context exit waits 28 seconds before its terminate fallback; the client uses
-the shared 30-second GUI worker shutdown limit. These outer process fallbacks
+Context exit waits 30 seconds before its terminate fallback; the client uses
+the shared 32-second GUI worker shutdown limit. These outer process fallbacks
 are still needed for an unresponsive OS driver. Initialization cancellation
 still interrupts modem setup immediately through the existing IPC check.
 
