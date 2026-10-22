@@ -6,8 +6,8 @@ manufacturer's H.324 terminal.
 
 ## Automated software checks
 
-The [core matrix run](https://github.com/danohn/h324/actions/runs/39719761953)
-passed **199 tests per job** against installed wheels on all twelve combinations
+The [core matrix run](https://github.com/danohn/h324/actions/runs/39722947196)
+passed **227 tests per job** against installed wheels on all twelve combinations
 of Python 3.11, 3.12, 3.13 and 3.14 with Ubuntu 24.04, macOS 15 and Windows 2022.
 Checks run outside the source checkout. The library environment includes neither
 Qt nor FFmpeg. CLI startup, worker startup and the installed H.245 resource are
@@ -18,7 +18,7 @@ The extracted projects retain the portable application/protocol tests; historica
 V.34 experiments, PBX utilities and capture-analysis diagnostics remain in that
 archive. Test totals across the new projects must not be described as a direct
 replacement of all 191 historical tests. The current core total consists of 141
-migrated tests and 58 new tests.
+migrated tests and 86 new tests.
 
 ## Physical macOS check
 
@@ -30,6 +30,14 @@ The received G.723.1 and H.263 streams matched the selected files byte for byte.
 Both endpoints decoded audio and video, and both confirmed restoration to idle
 and release of the serial port. Raw recordings used for this local acceptance
 check are not distributed.
+
+A final regression on core `3bac341` and client `eed05ea`, with freshly prepared
+six-second clips, repeated this byte-exact result in 71.22 seconds including
+setup and cleanup. It exercised the physical worker's 600 ms nominal final-drain
+allowance, pause/resume and a second send. Both audio/video streams matched the
+expected concatenated source bytes, both receivers decoded media, both observed
+bearers were 14,400 bps, and both serial ports were independently checked free.
+The drain allowance is elapsed nominal time, not a receiver acknowledgement.
 
 One earlier startup attempt failed before H.245 negotiation with an H.223 framing
 error. The captured flag stream contained a seven-bit flag interval during
@@ -52,7 +60,7 @@ frames before a local transmit underrun, with the peer detecting damaged framing
 afterward. Both modems restored successfully. This failed the ten-minute hardware
 criterion and publishing was stopped before upload. The initial acquisition fix
 and successful short file/API calls do not establish sustained pacing reliability;
-that issue is being investigated separately.
+the subsequent pacing investigation and successful retry are recorded below.
 
 A second sustained attempt with a per-call macOS `NSProcessInfo` activity guard
 failed after approximately 254 seconds of live capture. Both in-band and initial
@@ -62,6 +70,40 @@ showed clustered host/USB delays immediately before the underrun, including
 restored successfully. The guard was independently observed active, so this
 result does not establish App Nap as the cause or the guard as a pacing fix.
 The host-time buffer estimate is not a measurement of modem buffer occupancy.
+
+Bounded debt batching alone also failed a subsequent live call after about 247
+seconds of capture when a single 108 ms host gap exhausted the available lead.
+A further instrumented attempt failed after about 62 seconds of capture. Its
+recorded garbage-collection pauses peaked at 14–18 ms and did not coincide with
+the fatal gap, so GC was neither disabled nor frozen. These results do not
+support a fixed four-minute activity expiry or a complete fix from QoS alone.
+
+A separate transparent V.80 diagnostic sent 1,025-, 2,049- and 4,096-byte framed
+payloads in both directions. All six arrived byte for byte without overruns or
+framing errors. About 2 KB was accepted in under 1 ms; the approximately 4 KB
+writes blocked for about 980 ms while draining, demonstrating buffering and
+backpressure on this USB/modem path. Intentional gaps between diagnostic frames
+produced expected idle underruns; this was not an H.223 acceptance call. The
+physical worker now uses an independent transmitter and a bounded 900-wire-octet
+prime, with verified per-thread scheduling requests. This adds nominally 500 ms
+of nominal lead, rather than a measurement of modem buffer occupancy.
+
+The subsequent physical file/camera test, using the independent transmitter from
+`4e864d8`, passed **600.04 seconds of actual live capture** at explicitly reported
+14,400 bps in both directions. It recorded no active transmit underruns,
+overruns, H.223 framing errors or cleanup errors. The live encoder produced
+19,953 G.723.1 frames, approximately 99.76% of the expected count. The receiver
+obtained 19,936 audio frames and decoded 343 H.263 pictures; the small buffered
+tail was not fully delivered before hangup. Both directions received and decoded
+audio and video, and both modems restored and released their ports.
+
+This run included 164 video overload pauses/restarts while audio continued.
+Transmit queue high-water marks were 362 and 714 bytes against an 8,192-byte
+limit. Actual transmitter service gaps still reached approximately 167 ms and
+135 ms, despite verified scheduling requests. The extra buffering and independent
+writer accommodated those observed gaps; scheduling priority is not a real-time
+guarantee. This establishes one ten-minute result on this hardware profile,
+not indefinite clock stability or support for arbitrary modems.
 
 ## Installed async API physical check
 
