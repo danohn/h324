@@ -6,8 +6,8 @@ manufacturer's H.324 terminal.
 
 ## Automated software checks
 
-The [core matrix run](https://github.com/danohn/h324/actions/runs/39722947196)
-passed **227 tests per job** against installed wheels on all twelve combinations
+The [core matrix run](https://github.com/danohn/h324/actions/runs/39726104180)
+passed **254 tests per job** against installed wheels on all twelve combinations
 of Python 3.11, 3.12, 3.13 and 3.14 with Ubuntu 24.04, macOS 15 and Windows 2022.
 Checks run outside the source checkout. The library environment includes neither
 Qt nor FFmpeg. CLI startup, worker startup and the installed H.245 resource are
@@ -18,7 +18,7 @@ The extracted projects retain the portable application/protocol tests; historica
 V.34 experiments, PBX utilities and capture-analysis diagnostics remain in that
 archive. Test totals across the new projects must not be described as a direct
 replacement of all 191 historical tests. The current core total consists of 141
-migrated tests and 86 new tests.
+migrated tests and 113 new tests.
 
 ## Physical macOS check
 
@@ -134,7 +134,18 @@ Raw evidence remains in the private lab archive.
 
 ## Verification boundaries
 
-Physical Windows modem verification is pending the maintainer's manual test.
+A subsequent camera/microphone call used the native Windows x64 and macOS Apple
+Silicon candidates from core `4e864d8` and client `eed05ea`. The maintainer
+reported Windows 11, modem COM6, and working incoming picture and sound.
+Mac-side metadata recorded 608.61 seconds of continuous outgoing audio, 20,287
+30 ms audio frames, 700 outgoing pictures, and 21,093 received audio frames with
+1,172 received picture starts. Actual rate evidence was 14,400 bps. There were
+no active underruns, overruns, H.223 framing/reassembly errors or session failure;
+the transmit queue peaked at 685 bytes. Mac restoration and port release were
+confirmed. Windows-side logs, its exact OS build and modem driver have not been
+independently verified. The video delay and repeated encoder overload pauses
+remain documented client limitations; this result is not a latency acceptance.
+
 Physical Linux modem and capture-device verification is **unverified** until
 hardware is available. Native launch and camera/microphone results belong to the
 client's validation record. Cross-vendor H.324 terminal interoperability, other
