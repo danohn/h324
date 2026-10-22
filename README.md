@@ -9,7 +9,7 @@ access, V.32bis at 14,400 bps, H.223 level 0, SRP, aligned-PER H.245, G.723.1
 mono audio and H.263 SQCIF video. It is a tested prototype, not a complete
 H.324 implementation or a promise of interoperability with arbitrary terminals.
 
-Install with `pip install h324` (once the preview is published). Development:
+Install the experimental preview with `pip install h324==0.1.0a1`. Development:
 `uv sync --group dev`, `uv run pytest`. Enumerate ports with `h324 devices`;
 inspect an explicitly selected modem using `h324 probe --port DEVICE`.
 
