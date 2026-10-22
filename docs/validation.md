@@ -4,6 +4,23 @@ This is an experimental implementation of one finite H.324 profile. Installing a
 package successfully does not establish compatibility with a modem or another
 manufacturer's H.324 terminal.
 
+## Published alpha
+
+[`0.1.0a1` on PyPI](https://pypi.org/project/h324/0.1.0a1/) and the
+[GitHub alpha release](https://github.com/danohn/h324/releases/tag/v0.1.0a1)
+were published from `1a60d53b7db0bec7ff60584ce017a582de2ed092` through the
+[production workflow](https://github.com/danohn/h324/actions/runs/39730090577).
+All twelve installed-wheel jobs passed, followed by separate distribution
+build/audit, TestPyPI upload, exact-wheel retrieval/verification and PyPI Trusted
+Publishing. Public PyPI and GitHub archive hashes match the audited build.
+
+A clean macOS Python 3.14 environment installed the release from production
+PyPI outside the checkout. CLI, worker and installed-schema checks passed with
+an empty PATH and no Qt/capture dependencies, so no external FFmpeg executable
+was available during those checks. The GitHub release includes wheel/source
+archives and checksums. These publication checks do not extend the physical
+hardware claims recorded below.
+
 ## Automated software checks
 
 The [core matrix run](https://github.com/danohn/h324/actions/runs/39727978028)
