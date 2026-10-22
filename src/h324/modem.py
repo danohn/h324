@@ -175,3 +175,37 @@ def restore_close(m):
         m.restore_failed = True
     finally:
         m.close()
+
+
+def parse_carrier_report(lines):
+    """Verify the initial bearer from independent CX93001 AT result codes.
+
+    Only the supported V.32bis/14400 profile is validated. This never uses
+    configured speeds or fills an unspecified V.80 rate. Missing, malformed,
+    asymmetric or conflicting reports return None. The phase is initial
+    connection reporting; later V.80 rate reports retain their own meaning.
+    """
+    wanted = {'raw_mcr': (r'\+MCR:\s*(V32B)', ('V32B',)),
+              'raw_mrr': (r'\+MRR:\s*([0-9]+)\s*,\s*([0-9]+)', ('14400', '14400')),
+              'raw_connect': (r'CONNECT\s+([0-9]+)', ('14400',))}
+    reports = {}
+    for raw in lines:
+        if not isinstance(raw, str):
+            return None
+        text = raw.strip()
+        key = ('raw_mcr' if text.upper().startswith('+MCR:') else
+               'raw_mrr' if text.upper().startswith('+MRR:') else
+               'raw_connect' if text.upper().startswith('CONNECT') else None)
+        if key is None:
+            continue
+        pattern, expected = wanted[key]
+        match = re.fullmatch(pattern, text, re.IGNORECASE)
+        if match is None or tuple(value.upper() for value in match.groups()) != expected:
+            return None
+        # Repeated identical reports are harmless; conflicting ones were
+        # rejected above, even if a later line happens to match the target.
+        reports[key] = text
+    if set(reports) != set(wanted):
+        return None
+    return dict(source='AT+MRR', validated=True, phase='connect', modulation='V32B',
+                tx_bps=14400, rx_bps=14400, connect_bps=14400, **reports)

@@ -167,3 +167,29 @@ hanging up or enters idle/error, including when the producer is awaiting a new
 capture frame. `send()` then raises `H324Error`; the event reader requests this
 cancellation without awaiting producer teardown, so serial/IPC draining can
 continue. No new chunks or source-end writes are sent after that disconnect.
+
+## Independent initial bearer reports
+
+`telemetry.rate` and `cleanup.rate` continue to represent the **V.80 in-band
+rate** only. An unspecified in-band report remains `None`; the configured
+14,400 bps target is never substituted.
+
+The separate `carrier_report` field is `None` unless the modem's actual initial
+result codes consistently report V.32bis, transmit/receive rates of 14,400 bps,
+and `CONNECT 14400`. A verified report has `source="AT+MRR"`, `validated=True`,
+`phase="connect"`, `modulation="V32B"`, `tx_bps`, `rx_bps`, `connect_bps`, and the
+original `raw_mcr`, `raw_mrr` and `raw_connect` strings. The worker emits it in
+a `carrier_report` event and includes it in telemetry and cleanup. Applications
+can independently validate captured result lines with
+`h324.modem.parse_carrier_report(list_of_lines)`.
+
+These are independently reported **initial negotiated bearer rates**, not
+configuration readbacks. The Conexant reference manual describes +MR's actual
+negotiated/renegotiated result codes and +MRR's transmit/receive fields on
+pages 3-56 through 3-58 of the
+[StarTech-hosted CX930xx manual](https://sgcdn.startech.com/005329/media/sets/USB56KEMH2_Manual/AT%20Commands%20for%20USB56KEMH2.pdf#page=82).
+Missing, malformed, unknown, asymmetric or conflicting reports cannot create a
+verified carrier report. Later in-band reports remain independent: a known
+unsupported in-band rate is still fatal even when the initial AT report was
+14,400 bps. Reports and acceptance results must name which evidence source they
+used rather than describe an unspecified in-band status as verified.

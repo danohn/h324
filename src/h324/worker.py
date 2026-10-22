@@ -19,7 +19,7 @@ import sys
 import threading
 import time
 
-from h324.modem import Modem, FAILURES
+from h324.modem import Modem, FAILURES, parse_carrier_report
 from h324.v80 import shield
 from h324.modem import configure, restore_close
 from h324.h245 import codec
@@ -121,6 +121,7 @@ class Worker:
         self.connected_at = self.last_tx = self.last_rx = None
         self.tx_bytes = self.rx_bytes = 0
         self.rate = None
+        self.carrier_report = None
         self.last_rate_status = None
         self.negotiation = []
         self.connect_buffer = bytearray()
@@ -205,6 +206,7 @@ class Worker:
         self.call_generation += 1
         self.last_error = None
         self.rate = self.last_rate_status = self.connected_at = None
+        self.carrier_report = None
         self.last_tx = self.last_rx = None
         self.tx_bytes = self.rx_bytes = 0
         self.negotiation = []
@@ -247,6 +249,8 @@ class Worker:
                 self.modem.state = 'command'
                 raise RuntimeError('Modem: ' + text)
             if re.fullmatch(r'CONNECT(?:\s.*)?', text):
+                self.carrier_report = parse_carrier_report(self.negotiation)
+                self.emit(event='carrier_report', report=self.carrier_report)
                 self.modem.state = 'data'
                 self.connected_at = now
                 self.set_state('negotiating', 'Carrier connected; negotiating audio and video')
@@ -362,7 +366,7 @@ class Worker:
 
     def telemetry(self, now):
         s = self.session
-        self.emit(event='telemetry', rate=self.rate,
+        self.emit(event='telemetry', rate=self.rate, carrier_report=self.carrier_report,
                   elapsed=now-self.connected_at if self.connected_at is not None else 0,
                   tx_bytes=self.tx_bytes, rx_bytes=self.rx_bytes,
                   carrier=self.connected_at is not None,
@@ -395,7 +399,8 @@ class Worker:
                 error = (error + '; ' if error else '') + 'Modem idle/profile restoration was not confirmed'
             result = dict(station=self.station, error=error, cleanup_ok=cleanup_ok,
                           tx_bytes=self.tx_bytes, rx_bytes=self.rx_bytes, rate=self.rate,
-                          last_rate_status=self.last_rate_status, negotiation=self.negotiation,
+                          last_rate_status=self.last_rate_status, carrier_report=self.carrier_report,
+                          negotiation=self.negotiation,
                           session=self.session.summary() if self.session else None)
             self.emit(event='cleanup', **result)
             if self.directory:
