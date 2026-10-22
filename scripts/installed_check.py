@@ -6,9 +6,11 @@ import importlib
 import importlib.metadata
 import importlib.resources
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 
 def main() -> int:
@@ -28,7 +30,12 @@ def main() -> int:
     subprocess.run([sys.executable, "-m", "h324", "--help"], check=True)
     if args.client:
         subprocess.run([sys.executable, "-m", "modem_conference.helper", "--self-test"], check=True, timeout=45)
-        subprocess.run([sys.executable, "-m", "modem_conference", "--smoke-test"], check=True, timeout=45)
+        subprocess.run([sys.executable, "-m", "modem_conference.helper", "worker", "--self-test"], check=True, timeout=45)
+        with tempfile.TemporaryDirectory(prefix="Modem Conference installed smoke ") as temporary:
+            environment = os.environ.copy()
+            for kind in ("CONFIG", "CACHE", "LOG"):
+                environment[f"MODEM_CONFERENCE_{kind}_DIR"] = str(Path(temporary) / kind.lower())
+            subprocess.run([sys.executable, "-m", "modem_conference", "--smoke-test"], check=True, timeout=45, env=environment)
     else:
         subprocess.run([sys.executable, "-m", "h324.worker", "--self-test"], check=True, timeout=45)
     print(json.dumps({"installed": str(location), "version": importlib.metadata.version("modem-conference" if args.client else "h324")}))
