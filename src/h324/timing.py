@@ -1,0 +1,72 @@
+"""Bounded timing observations. Headroom is an estimate, not a DCE counter."""
+from collections import Counter, deque
+
+
+class PacerMetrics:
+    def __init__(self, history_size=64):
+        self.history = deque(maxlen=history_size)
+        self.counts = Counter()
+        self.started = self.last_loop = None
+        self.wire_bytes = 0
+        self.max_gap_ms = self.max_write_ms = self.max_read_ms = self.max_protocol_ms = 0.0
+        self.max_late_ms = 0.0
+        self.minimum_nominal_lead_ms = None
+        self.last_serial = {}
+
+    def start(self, now):
+        self.started = now
+        self.last_loop = now
+
+    def loop(self, now):
+        if self.started is None:
+            return
+        gap = max(0.0, (now-self.last_loop)*1000)
+        self.last_loop = now
+        self.max_gap_ms = max(self.max_gap_ms, gap)
+        self.counts['loops'] += 1
+        for limit in (5, 20, 50, 100):
+            if gap > limit:
+                self.counts[f'loop_gaps_over_{limit}_ms'] += 1
+        if gap > 20:
+            self.history.append(dict(at_s=round(now-self.started, 6), kind='loop_gap', gap_ms=round(gap, 3)))
+
+    def read(self, before, after):
+        self.max_read_ms = max(self.max_read_ms, (after-before)*1000)
+
+    def protocol(self, before, after):
+        self.max_protocol_ms = max(self.max_protocol_ms, (after-before)*1000)
+
+    def sent(self, before, after, wire_bytes, serial_bytes, deadline, serial_before, serial_after):
+        if self.started is None:
+            return
+        self.wire_bytes += wire_bytes
+        write_ms = max(0.0, (after-before)*1000)
+        late_ms = max(0.0, (before-deadline)*1000) if deadline is not None else 0.0
+        self.max_write_ms = max(self.max_write_ms, write_ms)
+        self.max_late_ms = max(self.max_late_ms, late_ms)
+        # Uses nominal 14,400 bps against host monotonic time. USB/firmware
+        # occupancy, actual oscillator drift and CTS delays are not measured by
+        # this estimate. They remain separately reported observations.
+        lead_ms = (self.wire_bytes/1800 - (after-self.started))*1000
+        self.minimum_nominal_lead_ms = lead_ms if self.minimum_nominal_lead_ms is None else min(self.minimum_nominal_lead_ms, lead_ms)
+        if self.last_serial and serial_after.get('cts') != self.last_serial.get('cts'):
+            self.counts['cts_transitions'] += 1
+        self.last_serial = serial_after
+        self.counts['writes'] += 1
+        self.history.append(dict(at_s=round(after-self.started, 6), kind='write',
+            write_ms=round(write_ms, 3), late_ms=round(late_ms, 3),
+            wire_bytes=wire_bytes, serial_bytes=serial_bytes,
+            nominal_lead_ms=round(lead_ms, 3), before=serial_before, after=serial_after))
+
+    def summary(self, history=False):
+        result = dict(algorithm='36-octets-per-20ms-plus-216-prefill',
+            clock='monotonic', counts=dict(self.counts),
+            max_loop_gap_ms=round(self.max_gap_ms, 3), max_write_ms=round(self.max_write_ms, 3),
+            max_read_ms=round(self.max_read_ms, 3), max_protocol_ms=round(self.max_protocol_ms, 3),
+            max_send_lateness_ms=round(self.max_late_ms, 3),
+            minimum_nominal_lead_ms=round(self.minimum_nominal_lead_ms, 3) if self.minimum_nominal_lead_ms is not None else None,
+            serial=self.last_serial,
+            nominal_lead_note='Host-time/nominal-rate estimate; not measured modem buffer occupancy')
+        if history:
+            result['recent'] = list(self.history)
+        return result

@@ -193,3 +193,33 @@ verified carrier report. Later in-band reports remain independent: a known
 unsupported in-band rate is still fatal even when the initial AT report was
 14,400 bps. Reports and acceptance results must name which evidence source they
 used rather than describe an unspecified in-band status as verified.
+
+## Call timing and macOS activity
+
+The physical worker requests a call-scoped `NSProcessInfo` activity on macOS,
+using `NSActivityUserInitiated | NSActivityLatencyCritical`. It releases the
+token after modem restoration, including cancellation and initialization
+failure. The constants and Objective-C signatures come from Apple's Foundation
+SDK. The isolated adapter uses the standard library's `ctypes`; Qt is not
+required. Other platforms do not load Objective-C. A failure to establish the
+macOS assertion aborts before opening the modem instead of claiming protected
+operation. Worker `--self-test` briefly acquires and releases the assertion
+without hardware, also exercising compiled helper builds.
+
+This requests precise timers and I/O while the user has an active call. It
+changes no global App Nap preferences or display-sleep settings. Apple documents
+how [App Nap can reduce timer frequency and device I/O](https://developer.apple.com/library/archive/documentation/Performance/Conceptual/power_efficiency_guidelines_osx/AppNap.html)
+and the [ProcessInfo activity API](https://developer.apple.com/documentation/foundation/processinfo?language=objc).
+An assertion is not a real-time scheduling guarantee or proof that App Nap
+caused an observed underrun.
+
+Telemetry includes bounded `timing` aggregates: maximum loop gap, write/read and
+protocol duration, transmit deadline lateness, CTS and OS output-queue samples.
+Cleanup additionally includes the latest 64 write/gap records. The reported
+nominal lead uses the host monotonic clock and nominal line rate; it is
+explicitly an **estimate**, not a measurement of the modem's buffer or crystal
+clock. These observations allow scheduler stalls, flow-control blocking and
+possible clock drift to be distinguished without retaining raw audio/video.
+
+The established 216-octet prefill and 36 octets per 20 ms schedule remain
+unchanged. Active V.80 underruns, framing errors and overruns remain fatal.

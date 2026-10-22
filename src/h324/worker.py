@@ -25,6 +25,8 @@ from h324.modem import configure, restore_close
 from h324.h245 import codec
 from h324.session import StreamingSession
 from h324.api import PROTOCOL_VERSION, ModemProfile
+from h324.activity import CallActivity
+from h324.timing import PacerMetrics
 
 
 class NullCapture:
@@ -130,6 +132,9 @@ class Worker:
         self.bundle_loading = False
         self.call_generation = 0
         self.last_error = None
+        self.activity = None
+        self.activity_report = None
+        self.timing = PacerMetrics()
 
     def emit(self, **event):
         if self.ipc_overload:
@@ -206,12 +211,21 @@ class Worker:
         self.call_generation += 1
         self.last_error = None
         self.rate = self.last_rate_status = self.connected_at = None
+        self.next_send = None
         self.carrier_report = None
         self.last_tx = self.last_rx = None
         self.tx_bytes = self.rx_bytes = 0
         self.negotiation = []
         self.connect_buffer.clear()
         self.set_state('initializing', 'Preparing V.80 synchronous modem access')
+        self.timing = PacerMetrics()
+        self.activity_report = None
+        self.activity = CallActivity()
+        try:
+            self.activity_report = self.activity.start()
+        except Exception as exc:
+            raise RuntimeError('Cannot establish call timing activity protection: ' + str(exc)) from exc
+        self.emit(event='activity', **self.activity_report)
         self.modem = self.modem_factory(port, 'station', directory,
                                         check_cancel=self._check_cancel)
         configure(self.modem, 'V32B', 'rts')
@@ -253,6 +267,7 @@ class Worker:
                 self.emit(event='carrier_report', report=self.carrier_report)
                 self.modem.state = 'data'
                 self.connected_at = now
+                self.timing.start(now)
                 self.set_state('negotiating', 'Carrier connected; negotiating audio and video')
                 self.session.start(now)
                 # H.223 6.3.1 permits consecutive full flags. Let V.80/remote
@@ -306,12 +321,28 @@ class Worker:
         if self.session.failure:
             raise RuntimeError(self.session.failure)
 
+    def _serial_snapshot(self):
+        result = {}
+        for key, attribute in (('cts', 'cts'), ('os_out_waiting', 'out_waiting')):
+            try:
+                result[key] = getattr(getattr(self.modem, 'port', None), attribute, None)
+            except (OSError, AttributeError):
+                result[key] = None
+        return result
+
     def _send(self, count, now):
         if now < getattr(self, 'protocol_release_at', 0):
             data = self.session.link.encoder.idle(count)
         else:
             data = self.session.link.pull(count)
-        self.modem.send(shield(data))
+        encoded = shield(data)
+        serial_before = self._serial_snapshot()
+        before = time.monotonic()
+        self.modem.send(encoded)
+        after = time.monotonic()
+        serial_after = self._serial_snapshot()
+        self.timing.sent(before, after, len(data), len(encoded),
+                         getattr(self, 'next_send', None), serial_before, serial_after)
         self.files['tx'].write(data)
         self.tx_bytes += len(data)
         self.last_tx = now
@@ -367,6 +398,7 @@ class Worker:
     def telemetry(self, now):
         s = self.session
         self.emit(event='telemetry', rate=self.rate, carrier_report=self.carrier_report,
+                  timing=self.timing.summary(), activity=self.activity_report,
                   elapsed=now-self.connected_at if self.connected_at is not None else 0,
                   tx_bytes=self.tx_bytes, rx_bytes=self.rx_bytes,
                   carrier=self.connected_at is not None,
@@ -379,8 +411,18 @@ class Worker:
                   media_transmitting=s.media_active if s else False,
                   paused=s.pause_start is not None if s else False)
 
+    def _release_activity(self):
+        activity, self.activity = self.activity, None
+        if activity is not None:
+            try:
+                self.activity_report = activity.close()
+            except Exception as exc:
+                self.activity_report = dict(active=False, source='NSProcessInfo', release_error=str(exc))
+            self.emit(event='activity', **self.activity_report)
+
     def _cleanup(self, error=None):
         if self.modem is None:
+            self._release_activity()
             if error:
                 self.set_state('error', error)
             return
@@ -397,7 +439,9 @@ class Worker:
                               not getattr(self.modem, 'restore_failed', False))
             if not cleanup_ok:
                 error = (error + '; ' if error else '') + 'Modem idle/profile restoration was not confirmed'
+            self._release_activity()
             result = dict(station=self.station, error=error, cleanup_ok=cleanup_ok,
+                          timing=self.timing.summary(history=True), activity=self.activity_report,
                           tx_bytes=self.tx_bytes, rx_bytes=self.rx_bytes, rate=self.rate,
                           last_rate_status=self.last_rate_status, carrier_report=self.carrier_report,
                           negotiation=self.negotiation,
@@ -406,6 +450,7 @@ class Worker:
             if self.directory:
                 (self.directory / 'results.json').write_text(json.dumps(result, indent=2) + '\n')
         finally:
+            self._release_activity()
             for stream in self.files.values():
                 stream.close()
             self.files = {}
@@ -444,14 +489,21 @@ class Worker:
                                 self._cleanup(str(exc))
                     if self.modem is not None:
                         now = time.monotonic()
+                        self.timing.loop(now)
+                        read_started = time.monotonic()
                         raw = self.modem.read()
+                        self.timing.read(read_started, time.monotonic())
                         if self.connected_at is None:
                             self._negotiate(raw, now)
                             if self.connected_at is None and now >= self.connect_deadline:
                                 raise TimeoutError('No connection before the call timeout')
                         else:
-                            self._feed(raw, now)
-                            self.session.tick(now)
+                            protocol_started = time.monotonic()
+                            try:
+                                self._feed(raw, now)
+                                self.session.tick(now)
+                            finally:
+                                self.timing.protocol(protocol_started, time.monotonic())
                             if self.session.failure:
                                 raise RuntimeError(self.session.failure)
                             if now >= self.next_send:
@@ -491,7 +543,13 @@ def main():
     args = parser.parse_args()
     if args.self_test:
         codec()
-        print(json.dumps(dict(protocol_version=PROTOCOL_VERSION, event='self_test', ready=True)))
+        activity = CallActivity()
+        try:
+            started = activity.start()
+        finally:
+            released = activity.close()
+        print(json.dumps(dict(protocol_version=PROTOCOL_VERSION, event='self_test', ready=True,
+                              activity=dict(started=started, released=released))))
         return 0
     protocol_stdout = sys.stdout
     sys.stdout = sys.stderr  # Legacy AT diagnostics must not contaminate JSON IPC.
