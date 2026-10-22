@@ -121,17 +121,21 @@ def test_gc_observer_records_duration_and_uninstalls_without_disabling_gc(monkey
     enabled = gc.isenabled()
     meter.install()
     assert meter.callback in gc.callbacks
-    meter.callback('start', dict(generation=2))
-    time.sleep(.001)
-    meter.callback('stop', dict(generation=2, collected=3, uncollectable=0))
-    result = meter.summary(history=True)
-    assert result['max_pause_ms'] >= 1
-    assert result['counts']['2'] >= 1
-    assert result['recent'][-1]['collected'] == 3
     meter.close()
     meter.close()
     assert gc.callbacks == before
     assert gc.isenabled() == enabled
+    # Measure arithmetic with an explicit clock, independently of OS timer
+    # resolution and any real GC callback overlapping this synthetic interval.
+    clock = [1_000_000_000]
+    monkeypatch.setattr(time, 'monotonic_ns', lambda: clock[0])
+    meter.callback('start', dict(generation=2))
+    clock[0] += 1_250_000
+    meter.callback('stop', dict(generation=2, collected=3, uncollectable=0))
+    result = meter.summary(history=True)
+    assert result['max_pause_ms'] == 1.25
+    assert result['counts']['2'] >= 1
+    assert result['recent'][-1]['collected'] == 3
 
 
 def test_gc_observer_history_is_bounded():
