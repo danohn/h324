@@ -28,13 +28,15 @@ def test_blocked_writer_does_not_block_receive_owner_and_cancel_stops_it():
                            cancel_write=release.set, scheduling_factory=Scheduling)
     pump.start()
     assert entered.wait(1)
-    reads = 0
-    deadline = time.monotonic()+.03
-    while time.monotonic() < deadline:
-        reads += 1
-        time.sleep(.001)
-    assert reads >= 5
-    assert pump.stop(timeout=1)
+    # Assert progress while the transmitter remains blocked. A fixed number
+    # of iterations in 30 ms measures CI scheduling speed instead of isolation.
+    try:
+        incoming = io.BytesIO(b'received while transmit is blocked')
+        assert incoming.read(8) == b'received'
+        assert incoming.read() == b' while transmit is blocked'
+        assert pump.thread.is_alive() and not release.is_set()
+    finally:
+        assert pump.stop(timeout=1)
     assert set(writer_threads) != {threading.get_ident()}
     assert pump.summary()['scheduling_released']['active'] is False
     assert pump.failure is None
@@ -42,19 +44,24 @@ def test_blocked_writer_does_not_block_receive_owner_and_cancel_stops_it():
 
 def test_transmit_owner_keeps_running_when_protocol_owner_stalls():
     writes = []
+    progress = threading.Event()
     clock = TransmitClock(time.monotonic_ns())
     def service():
         due = clock.due(time.monotonic_ns())
         if due:
             writes.append(due)
             clock.advance(due)
+            if sum(writes) >= 108:
+                progress.set()
     pump = DataTransmitter(lambda: None, service, lambda: clock.deadline_ns,
                            scheduling_factory=Scheduling)
     pump.start()
     # Simulated blocking protocol work releases the GIL, just as serial reads,
     # subprocess waits and timer waits do. The independent owner still paces.
-    time.sleep(.085)
-    assert pump.stop()
+    try:
+        assert progress.wait(2)
+    finally:
+        assert pump.stop()
     assert sum(writes) >= 108
     assert max(writes) <= 108
 
