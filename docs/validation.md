@@ -6,8 +6,8 @@ manufacturer's H.324 terminal.
 
 ## Automated software checks
 
-The [core matrix run](https://github.com/danohn/h324/actions/runs/39717829292)
-passed **165 tests per job** against installed wheels on all twelve combinations
+The [core matrix run](https://github.com/danohn/h324/actions/runs/39719024612)
+passed **191 tests per job** against installed wheels on all twelve combinations
 of Python 3.11, 3.12, 3.13 and 3.14 with Ubuntu 24.04, macOS 15 and Windows 2022.
 Checks run outside the source checkout. The library environment includes neither
 Qt nor FFmpeg. CLI startup, worker startup and the installed H.245 resource are
@@ -17,7 +17,8 @@ The unchanged local lab archive still passes its original **191-test suite**.
 The extracted projects retain the portable application/protocol tests; historical
 V.34 experiments, PBX utilities and capture-analysis diagnostics remain in that
 archive. Test totals across the new projects must not be described as a direct
-replacement of all 191 historical tests.
+replacement of all 191 historical tests. The current core total consists of 141
+migrated tests and 50 new tests; its equality to the archive total is coincidental.
 
 ## Physical macOS check
 
@@ -33,8 +34,18 @@ check are not distributed.
 One earlier startup attempt failed before H.245 negotiation with an H.223 framing
 error. The captured flag stream contained a seven-bit flag interval during
 initial acquisition; subsequent captured bits matched the transmitted stream.
-The application aborted and restored the modems. Framing errors remain fatal;
-this failure is retained as a known startup-reliability limitation.
+The application aborted and restored the modems. The physical worker now sends a
+one-second idle preamble and uses a bounded acquisition phase requiring eight
+full flags and the first valid control PDU. It records rejected startup candidates
+separately, then enforces strict framing. Acquisition is limited to five seconds
+and 72,000 received bits. A subsequent physical camera call recorded one rejected
+initial candidate, acquired framing and negotiated normally. The original failed
+attempts remain part of the evidence; post-acquisition errors remain fatal.
+
+V.80 in-band rates and initial AT carrier reports are distinct evidence. An
+unspecified in-band rate stays unknown. The separately named `carrier_report`
+requires consistent `+MCR`, `+MRR` and `CONNECT` result codes; it never uses the
+requested modem configuration as a measurement.
 
 ## Installed async API physical check
 
