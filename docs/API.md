@@ -257,6 +257,16 @@ and release on a temporary thread without opening a modem. Telemetry records
 the requested and observed scheduling state, owner failure and maximum service
 gap. The main worker checks transmitter failures on every receive loop.
 
+Prepared-file completion waits for the Link queue to empty and then for the
+transport's nominal drain allowance. `StreamingSession(drain_allowance=.2)`
+preserves the pure session's default; supplied `now` values determine elapsed
+time without a transport dependency. The physical worker explicitly uses
+**0.6 seconds**, covering its 900-octet nominal lead plus a 100 ms delivery
+margin. This prevents reporting a file finished while its last queued bytes
+are still within that nominal lead. It is an elapsed-time allowance, not a
+measurement of modem-buffer depletion or acknowledgement by the receiver.
+The session summary reports `drain_allowance_seconds`.
+
 Shutdown stops and joins the owner before EOT, DTR/profile restoration or closing
 capture files. A blocked write is cancelled through the serial adapter, with
 port closure as a final bounded fallback. If the thread still cannot join, the

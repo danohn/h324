@@ -5,6 +5,7 @@ standard H.223 media channels; local file metadata stays on the IPC connection.
 """
 from dataclasses import asdict
 from collections import Counter, deque
+import math
 from h324.api import MediaChunk
 
 from h324.h223 import Slot, al2_decode, al2_encode
@@ -15,7 +16,11 @@ from h324.al3 import Transmitter, decode as decode_al3
 
 
 class StreamingSession:
-    def __init__(self, emit=None, log=None, *, status_number=None, max_queued=8192, startup_hunt=False):
+    def __init__(self, emit=None, log=None, *, status_number=None, max_queued=8192,
+                 startup_hunt=False, drain_allowance=.2):
+        self.drain_allowance = float(drain_allowance)
+        if not math.isfinite(self.drain_allowance) or self.drain_allowance < 0:
+            raise ValueError('Transport drain allowance must be finite and nonnegative')
         self.emit = emit or (lambda **event: None)
         self.log = log or (lambda *args, **fields: None)
         self.link = Link(self.log, max_queued=max_queued, startup_hunt=startup_hunt)
@@ -263,9 +268,9 @@ class StreamingSession:
             if self.cursor == len(self.source) and not self.link.pending:
                 if self.drained_at is None:
                     self.drained_at = now
-                # Allow the final wire/USB prefill to leave the modem before
-                # reporting finished. This is local TX completion, no remote ACK.
-                if now - self.drained_at >= .2 and (self.stopped or position >= self.duration_ms):
+                # Transport-supplied nominal time for queued wire/USB data to
+                # drain. This elapsed allowance is not a modem or remote ACK.
+                if now - self.drained_at >= self.drain_allowance and (self.stopped or position >= self.duration_ms):
                     self.source = None
                     self.emit(event='media_finished', label=self.source_label, stopped=self.stopped,
                               duration_ms=self.duration_ms)
@@ -276,5 +281,6 @@ class StreamingSession:
 
     def summary(self):
         return dict(failure=self.failure, ready=self.ready, role=self.h245.role,
+                    drain_allowance_seconds=self.drain_allowance,
                     counts=dict(self.counts), srp_counts=dict(self.srp.counts),
                     al3_counts=dict(self.al3_tx.counts), transport=self.link.summary())

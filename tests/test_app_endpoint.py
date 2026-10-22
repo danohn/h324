@@ -26,10 +26,10 @@ class PrimeOnlyTransmitter:
 
 
 class Pair:
-    def __init__(self):
+    def __init__(self, **session_options):
         self.events = [[], []]
         self.endpoints = [StreamingSession(lambda _i=i, **event: self.events[_i].append(event),
-                                          status_number=i + 1) for i in range(2)]
+                                          status_number=i + 1, **session_options) for i in range(2)]
         self.now = 0
         for s in self.endpoints:
             s.start(0)
@@ -128,6 +128,33 @@ def test_session_refuses_unnegotiated_unsorted_and_concurrent_sources():
     pair.endpoints[0].send_media(video_source(1, 1), 40, pair.now)
     with pytest.raises(RuntimeError, match='already'):
         pair.endpoints[0].send_media(video_source(2, 1), 40, pair.now)
+
+
+@pytest.mark.parametrize('allowance', [.2, .6])
+def test_movie_completion_waits_for_transport_supplied_drain_allowance(allowance):
+    pair = Pair(drain_allowance=allowance)
+    sender = pair.endpoints[0]
+    source = video_source(0x5a, 1)
+    sender.send_media(source, 40, pair.now, 'Final picture')
+    pair.pump(.2)
+    assert pair.received(1, 2) == [source[0].payload]
+    assert sender.drained_at is not None
+    assert not sender.link.pending
+    assert sender.media_active
+    drained_at = sender.drained_at
+    sender.tick(drained_at + allowance - .001)
+    assert sender.media_active
+    assert not any(event['event'] == 'media_finished' for event in pair.events[0])
+    sender.tick(drained_at + allowance + .001)
+    assert not sender.media_active
+    assert len([event for event in pair.events[0] if event['event'] == 'media_finished']) == 1
+    assert sender.summary()['drain_allowance_seconds'] == allowance
+
+
+@pytest.mark.parametrize('allowance', [-1, float('inf'), float('nan')])
+def test_transport_drain_allowance_must_be_finite_and_nonnegative(allowance):
+    with pytest.raises(ValueError, match='drain allowance'):
+        StreamingSession(drain_allowance=allowance)
 
 
 def test_stdin_reader_rejects_invalid_input_and_closes_on_eof():

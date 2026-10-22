@@ -241,7 +241,10 @@ class Worker:
                                         check_cancel=self._check_cancel)
         configure(self.modem, 'V32B', 'rts')
         self.settings = {'configured_mode': 'V32B', 'configured_rate': 14400}
-        self.session = StreamingSession(self._session_event, self.modem.log, startup_hunt=True)
+        # 900 wire octets / 1,800 octets/s, plus 100 ms nominal delivery margin.
+        # Completion remains an elapsed drain allowance, not a remote ACK.
+        self.session = StreamingSession(self._session_event, self.modem.log,
+                                        startup_hunt=True, drain_allowance=.6)
         self.files = {name: (directory / filename).open('wb') if directory else NullCapture()
                       for name, filename in (('audio', 'received-audio.g723'),
                                              ('video', 'received-video.h263'),
