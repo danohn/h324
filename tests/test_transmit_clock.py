@@ -115,7 +115,7 @@ def test_maximum_debt_batch_respects_worst_case_em_shielding():
     assert 216 < 255
 
 
-def test_worker_services_transmit_before_receive_and_again_after_protocol(monkeypatch):
+def test_receive_loop_checks_owner_without_writing_serial_data(monkeypatch):
     from h324.worker import Worker
     from types import SimpleNamespace
     events = []
@@ -127,12 +127,13 @@ def test_worker_services_transmit_before_receive_and_again_after_protocol(monkey
     worker.modem = SimpleNamespace(read=read)
     worker.connected_at = 0
     worker.session = SimpleNamespace(tick=lambda now: events.append('tick'), failure=None)
-    monkeypatch.setattr(worker, '_send_due', lambda: events.append('send_due'))
+    monkeypatch.setattr(worker, '_send_due', lambda: pytest.fail('RX thread wrote serial data'))
+    monkeypatch.setattr(worker, '_check_transmitter', lambda: events.append('check_tx'))
     monkeypatch.setattr(worker, '_feed', lambda raw, now: events.append('feed'))
     monkeypatch.setattr(worker, 'telemetry', lambda now: None)
     monkeypatch.setattr(worker, '_cleanup', lambda *a: setattr(worker, 'modem', None))
     worker.run()
-    assert events[:5] == ['send_due', 'read', 'feed', 'tick', 'send_due']
+    assert events[:5] == ['check_tx', 'read', 'feed', 'tick', 'check_tx']
 
 
 def test_failed_submission_does_not_advance_deadline(monkeypatch):

@@ -27,6 +27,7 @@ from h324.session import StreamingSession
 from h324.api import PROTOCOL_VERSION, ModemProfile
 from h324.activity import CallActivity
 from h324.timing import PacerMetrics, TransmitClock, CollectionMetrics
+from h324.transmit import DataTransmitter, scheduling_self_test
 
 
 class NullCapture:
@@ -108,17 +109,22 @@ def read_commands(stream, inbox):
 
 
 class Worker:
-    def __init__(self, station, emit, *, inbox=None, modem_factory=ResponsiveModem):
+    def __init__(self, station, emit, *, inbox=None, modem_factory=ResponsiveModem,
+                 transmitter_factory=DataTransmitter):
         self.station = str(station)
         self._emit_callback = emit
         self.ipc_overload = False
         self.inbox = inbox if inbox is not None else queue.Queue(maxsize=100)
         self.modem_factory = modem_factory
+        self.transmitter_factory = transmitter_factory
+        self.transmitter = None
+        self.transmitter_report = None
         self.modem = self.session = None
         self.directory = None
         self.files = {}
         self.state = 'idle'
         self.shutdown_requested = False
+        self.fatal_transmit_stop = False
         self.cleanup_mode = False
         self.connected_at = self.last_tx = self.last_rx = None
         self.tx_bytes = self.rx_bytes = 0
@@ -197,6 +203,8 @@ class Worker:
             raise RuntimeError('Serial port is already in use: ' + owners.stdout.strip())
 
     def _initialize(self, command):
+        if self.fatal_transmit_stop:
+            raise RuntimeError('Worker quarantined after transmit shutdown failure; start a new worker')
         if self.modem is not None:
             raise ValueError('This window already owns a modem call')
         port = command.get('port')
@@ -281,10 +289,11 @@ class Worker:
                 if self.connect_buffer:
                     self._feed(bytes(self.connect_buffer), now)
                     self.connect_buffer.clear()
-                self.modem.send(b'\x19\xb0')  # Explicit transparent submode.
-                self._send(216, now)
-                self.transmit_clock = TransmitClock(round(now*1_000_000_000))
-                self.next_send = self.transmit_clock.deadline_ns/1_000_000_000
+                cancel_write = getattr(getattr(self.modem, 'port', None), 'cancel_write', None)
+                self.transmitter = self.transmitter_factory(self._prime_transmit, self._send_due,
+                    lambda: self.transmit_clock.deadline_ns, cancel_write=cancel_write)
+                self.transmitter_report = self.transmitter.start()
+                self.emit(event='transmit_owner', **self.transmitter_report)
                 return
 
     def _feed(self, raw, now):
@@ -338,7 +347,8 @@ class Worker:
         if now < getattr(self, 'protocol_release_at', 0):
             data = self.session.link.encoder.idle(count)
         else:
-            data = self.session.link.pull(count)
+            data = b''.join(self.session.link.pull(min(255, count-offset))
+                            for offset in range(0, count, 255))
         encoded = shield(data)
         serial_before = self._serial_snapshot()
         before = time.monotonic()
@@ -350,6 +360,42 @@ class Worker:
         self.files['tx'].write(data)
         self.tx_bytes += len(data)
         self.last_tx = now
+
+    def _prime_transmit(self):
+        # Only the transmit owner writes data until it has stopped and joined.
+        # Hardware burst tests verified >2 KB accepted with correct USB
+        # backpressure. This bounded 900-wire-octet lead is approximately 500 ms
+        # at 14,400 bps and tolerates process-wide pauses that a thread alone
+        # cannot avoid (for example a GIL-holding collection).
+        self.modem.send(b'\x19\xb0')
+        now_ns = time.monotonic_ns()
+        self.timing.start(now_ns/1_000_000_000)
+        self.protocol_release_at = now_ns/1_000_000_000 + 1.0
+        self.transmit_clock = TransmitClock(now_ns)
+        self.next_send = None
+        self._send(900, now_ns/1_000_000_000)
+        self.next_send = self.transmit_clock.deadline_ns/1_000_000_000
+
+    def _check_transmitter(self):
+        if self.transmitter is not None and self.transmitter.failure is not None:
+            raise RuntimeError('Serial transmit owner failed: ' + str(self.transmitter.failure))
+
+    def _stop_transmitter(self):
+        if self.transmitter is None:
+            return True
+        stopped = self.transmitter.stop()
+        if not stopped and self.modem is not None:
+            # Never issue AT commands while a serial writer might still run.
+            # Closing the port is the final bounded cancellation fallback.
+            try:
+                self.modem.port.close()
+            except (AttributeError, OSError):
+                pass
+            stopped = self.transmitter.stop(timeout=1)
+        self.transmitter_report = self.transmitter.summary()
+        if stopped:
+            self.transmitter = None
+        return stopped
 
     def _send_due(self):
         if self.modem is None or self.connected_at is None or self.transmit_clock is None:
@@ -414,6 +460,7 @@ class Worker:
         s = self.session
         self.emit(event='telemetry', rate=self.rate, carrier_report=self.carrier_report,
                   timing=self.timing.summary(), gc=self.gc_metrics.summary(), activity=self.activity_report,
+                  transmit_owner=self.transmitter.summary() if self.transmitter else self.transmitter_report,
                   elapsed=now-self.connected_at if self.connected_at is not None else 0,
                   tx_bytes=self.tx_bytes, rx_bytes=self.rx_bytes,
                   carrier=self.connected_at is not None,
@@ -436,6 +483,10 @@ class Worker:
             self.emit(event='activity', **self.activity_report)
 
     def _cleanup(self, error=None):
+        if self.fatal_transmit_stop:
+            # The process must exit without reusing resources a detached serial
+            # owner may still reference. The OS closes them at process exit.
+            return
         if self.modem is None:
             self._release_activity()
             if error:
@@ -443,13 +494,22 @@ class Worker:
             return
         self.set_state('hanging_up', 'Hanging up and restoring the modem')
         self.cleanup_mode = True
+        retain_resources = False
         try:
             # EOT is in-band modem control, followed by proven DTR/AT restoration.
             # Do not wait for DCD: these USB modems can leave it asserted.
-            if self.modem.state == 'data':
-                with contextlib.suppress(Exception):
-                    self.modem.send(b'\x19\xba')
-            restore_close(self.modem)
+            transmitter_stopped = self._stop_transmitter()
+            if transmitter_stopped:
+                if self.modem.state == 'data':
+                    with contextlib.suppress(Exception):
+                        self.modem.send(b'\x19\xba')
+                restore_close(self.modem)
+            else:
+                retain_resources = True
+                self.fatal_transmit_stop = self.shutdown_requested = True
+                error = (error + '; ' if error else '') + 'Transmit owner did not stop; port closed without AT restoration'
+                self.modem.cleanup_ok = False
+                self.modem.restore_failed = True
             cleanup_ok = bool(getattr(self.modem, 'cleanup_ok', False) and
                               not getattr(self.modem, 'restore_failed', False))
             if not cleanup_ok:
@@ -457,6 +517,7 @@ class Worker:
             self._release_activity()
             result = dict(station=self.station, error=error, cleanup_ok=cleanup_ok,
                           timing=self.timing.summary(history=True), gc=self.gc_metrics.summary(history=True),
+                          transmit_owner=self.transmitter_report,
                           activity=self.activity_report,
                           tx_bytes=self.tx_bytes, rx_bytes=self.rx_bytes, rate=self.rate,
                           last_rate_status=self.last_rate_status, carrier_report=self.carrier_report,
@@ -467,10 +528,11 @@ class Worker:
                 (self.directory / 'results.json').write_text(json.dumps(result, indent=2) + '\n')
         finally:
             self._release_activity()
-            for stream in self.files.values():
-                stream.close()
-            self.files = {}
-            self.modem = self.session = None
+            if not retain_resources:
+                for stream in self.files.values():
+                    stream.close()
+                self.files = {}
+                self.modem = self.session = None
             self.connected_at = None
             self.call_generation += 1
             self.cleanup_mode = False
@@ -507,9 +569,7 @@ class Worker:
                     if self.modem is not None:
                         now = time.monotonic()
                         self.timing.loop(now)
-                        # Refill overdue line bytes before USB reads or protocol
-                        # work can spend the remaining modem headroom.
-                        self._send_due()
+                        self._check_transmitter()
                         read_started = time.monotonic()
                         raw = self.modem.read()
                         self.timing.read(read_started, time.monotonic())
@@ -526,8 +586,7 @@ class Worker:
                                 self.timing.protocol(protocol_started, time.monotonic())
                             if self.session.failure:
                                 raise RuntimeError(self.session.failure)
-                            # Protocol processing may itself span a deadline.
-                            self._send_due()
+                            self._check_transmitter()
                     try:
                         generation, sdus, manifest, load_error = self.bundle_result.get_nowait()
                     except queue.Empty:
@@ -549,11 +608,6 @@ class Worker:
                 except Exception as exc:
                     self.emit(event='error', message=str(exc))
                     self._cleanup(str(exc))
-                if (self.modem is not None and self.connected_at is not None and
-                        self.transmit_clock is not None and self.transmit_clock.due(time.monotonic_ns())):
-                    # Keep draining RX between bounded batches, but do not add
-                    # an intentional sleep while already behind the line clock.
-                    continue
                 time.sleep(.002 if self.modem else .02)
         finally:
             try:
@@ -576,7 +630,8 @@ def main():
         finally:
             released = activity.close()
         print(json.dumps(dict(protocol_version=PROTOCOL_VERSION, event='self_test', ready=True,
-                              activity=dict(started=started, released=released))))
+                              activity=dict(started=started, released=released),
+                              transmit_scheduling=scheduling_self_test())))
         return 0
     protocol_stdout = sys.stdout
     sys.stdout = sys.stderr  # Legacy AT diagnostics must not contaminate JSON IPC.
@@ -634,7 +689,7 @@ def main():
     deadline = time.monotonic() + 1
     while output.unfinished_tasks and time.monotonic() < deadline:
         time.sleep(.01)
-    return 0
+    return 1 if worker.fatal_transmit_stop else 0
 
 
 if __name__ == '__main__':

@@ -1,9 +1,20 @@
 """Bounded timing observations. Headroom is an estimate, not a DCE counter."""
 from collections import Counter, deque
+from functools import wraps
+import threading
+
+
+def _meter_synchronized(method):
+    @wraps(method)
+    def locked(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return locked
 
 
 class PacerMetrics:
     def __init__(self, history_size=64):
+        self._lock = threading.RLock()
         self.history = deque(maxlen=history_size)
         self.counts = Counter()
         self.started = self.last_loop = None
@@ -13,10 +24,12 @@ class PacerMetrics:
         self.minimum_nominal_lead_ms = None
         self.last_serial = {}
 
+    @_meter_synchronized
     def start(self, now):
         self.started = now
         self.last_loop = now
 
+    @_meter_synchronized
     def loop(self, now):
         if self.started is None:
             return
@@ -30,12 +43,15 @@ class PacerMetrics:
         if gap > 20:
             self.history.append(dict(at_s=round(now-self.started, 6), kind='loop_gap', gap_ms=round(gap, 3)))
 
+    @_meter_synchronized
     def read(self, before, after):
         self.max_read_ms = max(self.max_read_ms, (after-before)*1000)
 
+    @_meter_synchronized
     def protocol(self, before, after):
         self.max_protocol_ms = max(self.max_protocol_ms, (after-before)*1000)
 
+    @_meter_synchronized
     def sent(self, before, after, wire_bytes, serial_bytes, deadline, serial_before, serial_after):
         if self.started is None:
             return
@@ -52,16 +68,17 @@ class PacerMetrics:
         if self.last_serial and serial_after.get('cts') != self.last_serial.get('cts'):
             self.counts['cts_transitions'] += 1
         self.last_serial = serial_after
-        self.counts['writes'] += 1
-        if wire_bytes > 36 and wire_bytes != 216:
+        if self.counts['writes'] and wire_bytes > 36:
             self.counts['debt_batch_writes'] += 1
+        self.counts['writes'] += 1
         self.history.append(dict(at_s=round(after-self.started, 6), kind='write',
             write_ms=round(write_ms, 3), late_ms=round(late_ms, 3),
             wire_bytes=wire_bytes, serial_bytes=serial_bytes,
             nominal_lead_ms=round(lead_ms, 3), before=serial_before, after=serial_after))
 
+    @_meter_synchronized
     def summary(self, history=False):
-        result = dict(algorithm='36-octets-per-20ms-debt-batches-max108-plus216-prefill',
+        result = dict(algorithm='independent-transmit-thread-36-per20ms-max108-plus900-prefill',
             clock='monotonic', counts=dict(self.counts),
             max_loop_gap_ms=round(self.max_gap_ms, 3), max_write_ms=round(self.max_write_ms, 3),
             max_read_ms=round(self.max_read_ms, 3), max_protocol_ms=round(self.max_protocol_ms, 3),

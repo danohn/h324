@@ -4,12 +4,22 @@ Only LCN0/entry0 exists initially. Media entries are activated by H.245 events.
 This finite profile is an engineering prototype, not full H.324 conformance.
 """
 from collections import Counter, deque
+from functools import wraps
+import threading
 from dataclasses import asdict
 import hashlib
 
 from h324.h223 import Table, Slot, Multiplexer, Demultiplexer, WireEncoder, Framer, al2_decode
 from h324.v80 import Decoder
 from h324.srp import Endpoint as SRP, COMMAND, RESPONSE
+
+
+def _tx_synchronized(method):
+    @wraps(method)
+    def locked(self, *args, **kwargs):
+        with self._tx_lock:
+            return method(self, *args, **kwargs)
+    return locked
 
 
 def digest(data):
@@ -24,6 +34,7 @@ class Link:
     """
     def __init__(self, log, max_queued=32768, *, startup_hunt=False):
         self.log = log
+        self._tx_lock = threading.RLock()
         self.tx_table, self.rx_table = Table(), Table()
         self.mux = Multiplexer(self.tx_table, {0, 2})
         self.demux = Demultiplexer(self.rx_table, {0, 2}, {0})
@@ -38,9 +49,11 @@ class Link:
         self.active_underruns = 0
 
     @property
+    @_tx_synchronized
     def pending(self):
         return bool(self.encoded or any(self.queues) or self.mux.pending_end)
 
+    @_tx_synchronized
     def queue_sdu(self, mc, data, priority, segmentable):
         if not data or not 0 <= priority <= 2:
             raise ValueError('nonempty SDU and priority0..2 required')
@@ -54,6 +67,7 @@ class Link:
             self.queued_bytes += len(chunk)
         self.high_water = max(self.high_water,self.queued_bytes)
 
+    @_tx_synchronized
     def pull(self, count):
         if not 1 <= count <= 255:
             raise ValueError('line pull must be1..255 octets')
@@ -93,6 +107,7 @@ class Link:
             for sdu in self.demux.feed(pdu):
                 yield sdu
 
+    @_tx_synchronized
     def summary(self):
         return dict(tx_entries=sorted(self.tx_table.entries),rx_entries=sorted(self.rx_table.entries),
             rx_open_channels=sorted(self.demux.open_channels),pdu_codes=dict(self.pdu_counts),

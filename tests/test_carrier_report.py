@@ -6,6 +6,17 @@ from h324.modem import parse_carrier_report
 from h324.session import StreamingSession
 from h324.worker import Worker
 
+
+class PrimeOnlyTransmitter:
+    """Keep parser tests synchronous; separate tests exercise the actual owner."""
+    failure = None
+    def __init__(self, prime, *args, **kwargs): self.prime = prime
+    def start(self):
+        self.prime()
+        return dict(active=False)
+    def stop(self, **kwargs): return True
+    def summary(self): return dict(active=False)
+
 VALID = ['+MCR: V32B', '+MRR: 14400,14400', '+ER: NONE', 'CONNECT 14400']
 
 
@@ -30,7 +41,7 @@ def test_missing_unknown_asymmetric_or_conflicting_reports_cannot_verify(lines):
 
 def test_telemetry_keeps_unspecified_inband_rate_unknown_with_verified_at_report():
     events = []
-    worker = Worker('test', lambda **event: events.append(event))
+    worker = Worker('test', lambda **event: events.append(event), transmitter_factory=PrimeOnlyTransmitter)
     worker.modem = SimpleNamespace(state='dialling', log=lambda *a, **k: None, send=lambda data: None)
     worker.session = StreamingSession(status_number=1)
     worker.files = {name: io.BytesIO() for name in ('audio', 'video', 'rx', 'tx')}

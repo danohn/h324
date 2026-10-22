@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import time
+import threading
 from pathlib import Path
 import serial
 from serial.tools import list_ports
@@ -25,6 +26,7 @@ def classify(line):
 class Modem:
     def __init__(self, device, name, directory=None):
         self.name, self.device = name, device
+        self._log_lock = threading.RLock()
         self.logfile = (directory / "modem.jsonl").open("w") if directory else None
         self.port = serial.Serial(port=None, baudrate=115200, bytesize=8,
                                   parity="N", stopbits=1, timeout=0,
@@ -46,8 +48,9 @@ class Modem:
         record = dict(time=dt.datetime.now(dt.timezone.utc).isoformat(),
                       monotonic=time.monotonic(), event=event, **details)
         if self.logfile:
-            self.logfile.write(json.dumps(record) + "\n")
-            self.logfile.flush()
+            with self._log_lock:
+                self.logfile.write(json.dumps(record) + "\n")
+                self.logfile.flush()
         else:
             logging.getLogger("h324.modem").debug("%s", event)
 

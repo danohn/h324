@@ -221,19 +221,46 @@ explicitly an **estimate**, not a measurement of the modem's buffer or crystal
 clock. These observations allow scheduler stalls, flow-control blocking and
 possible clock drift to be distinguished without retaining raw audio/video.
 
-The 216-octet prefill and mean rate of 36 octets per 20 ms remain unchanged.
-Overdue quanta are repaid in batches of at most **108 wire octets**, whose
-worst-case EM-shielded size is 216 serial octets, below the profile's 255-octet
-transmit flow-control threshold. An integer monotonic epoch and tick index
-preserve the mean rate without accumulated floating-point deadlines or an
-unmeasured positive clock bias. Submission failures do not advance the clock.
+A dedicated serial transmit thread owns all data writes between CONNECT and
+cleanup. Receive reads, H.245 handling, command processing and IPC output run
+independently. The Link queue lock protects only short enqueue/encoding work;
+serial writes never hold it. A write delayed by USB backpressure therefore does
+not prevent the receive owner from draining the modem. Process-wide pauses,
+including GIL-holding work, can still delay both threads.
 
-The worker services overdue transmit bytes before receive reads/protocol work
-and again after protocol work. It drains RX between bounded repayment batches
-and adds no deliberate sleep while already behind. This prevents a cluster of
-moderate scheduler stalls from becoming an increasing queue of one-quantum
-repayments. Unit models replay the observed stall cluster with explicit USB
-delivery lag and finite occupancy, and repeat bounded stalls over ten simulated
-minutes. Their occupancy and delivery lag are model assumptions, not measured
-firmware values or substitutes for physical acceptance. Short serial writes,
-active V.80 underruns, framing errors and overruns remain fatal.
+The tested CX93001 profile primes **900 wire octets** (approximately 500 ms at
+14,400 bps), then submits a mean of **36 octets per 20 ms**. Overdue quanta are
+repaid in batches of at most **108 wire octets**. Physical burst diagnostics
+verified exact bidirectional delivery of 2,094 shielded serial octets accepted
+in under 1 ms, and a 4,172-octet write that blocked for approximately 980 ms.
+The 900-octet prime uses at most 1,800 shielded serial octets. This bound is
+based on that observed composite USB/driver/modem acceptance, rather than
+treating the `+ITF` flow-control threshold as the entire physical capacity.
+These observations apply to the documented tested hardware combination.
+
+An integer monotonic epoch and tick index preserve the mean rate without
+accumulated floating-point deadlines or a positive clock bias. Submission
+failures do not advance the clock. A half-second prime also adds approximately
+half a second of scheduling lead and associated call latency. Host-time pacing
+does not provide indefinite oscillator synchronization: [V.80 Appendix I.2](https://www.itu.int/rec/T-REC-V.80-199608-I/en)
+explains why modem feedback is needed to avoid eventual clock drift. The current
+profile does not claim an occupancy feedback loop or unlimited call duration.
+
+The actual transmit thread requests macOS `QOS_CLASS_USER_INTERACTIVE`, with
+readback, or Windows `THREAD_PRIORITY_HIGHEST` and a scoped 1 ms timer request.
+Linux uses the default scheduler. Windows requests and prior priority are
+released when the owner exits; macOS restores its prior QoS where available.
+These are scheduler preferences, not hard deadline guarantees. Apple's
+[QoS API](https://github.com/apple-oss-distributions/libpthread/blob/main/include/pthread/qos.h)
+documents the thread-specific request. Worker `--self-test` exercises acquisition
+and release on a temporary thread without opening a modem. Telemetry records
+the requested and observed scheduling state, owner failure and maximum service
+gap. The main worker checks transmitter failures on every receive loop.
+
+Shutdown stops and joins the owner before EOT, DTR/profile restoration or closing
+capture files. A blocked write is cancelled through the serial adapter, with
+port closure as a final bounded fallback. If the thread still cannot join, the
+worker reports failed cleanup, refuses further calls and exits nonzero without
+reusing the writer's resources. Short serial writes, active V.80 underruns,
+framing errors and overruns remain fatal. Timing models and unit tests do not
+replace physical call acceptance.

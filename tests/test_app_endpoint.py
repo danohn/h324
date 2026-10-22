@@ -14,6 +14,17 @@ from h324.media import MediaSDU, load_fixture
 from h324.v80 import shield
 
 
+class PrimeOnlyTransmitter:
+    """Keep parser tests synchronous; separate tests exercise the actual owner."""
+    failure = None
+    def __init__(self, prime, *args, **kwargs): self.prime = prime
+    def start(self):
+        self.prime()
+        return dict(active=False)
+    def stop(self, **kwargs): return True
+    def summary(self): return dict(active=False)
+
+
 class Pair:
     def __init__(self):
         self.events = [[], []]
@@ -128,7 +139,7 @@ def test_stdin_reader_rejects_invalid_input_and_closes_on_eof():
 
 def test_connect_parser_preserves_binary_following_connect(tmp_path, monkeypatch):
     events = []
-    worker = Worker('1001', lambda **event: events.append(event))
+    worker = Worker('1001', lambda **event: events.append(event), transmitter_factory=PrimeOnlyTransmitter)
     sent = []
     worker.modem = SimpleNamespace(state='dialling', log=lambda *a, **kw: None, send=sent.append)
     worker.session = StreamingSession(worker._session_event, status_number=1)
@@ -141,7 +152,7 @@ def test_connect_parser_preserves_binary_following_connect(tmp_path, monkeypatch
     worker._feed(b'\x26', 10.02)
     assert worker.rate == 14400
     assert sent[0] == b'\x19\xb0'
-    assert len(worker.files['tx'].getvalue()) == 216
+    assert len(worker.files['tx'].getvalue()) == 900
     assert worker.state == 'negotiating'
 
 
