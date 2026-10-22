@@ -4,6 +4,8 @@ This is an experimental alpha. Software CI and installation support are separate
 from physical modem compatibility. Keep unverified operating systems and modem
 models identified in the README and release notes.
 
+Current evidence and hardware limits are tracked in [validation.md](validation.md).
+
 ## One-time publishing setup
 
 Create GitHub environments `testpypi`, `pypi` and `release`, with a maintainer
