@@ -307,7 +307,11 @@ class AsyncModem:
             self._call = Call(self)
             return self._call
         except BaseException:
-            await asyncio.shield(self._hangup())
+            # A worker can close stdout before asyncio has reaped its exit.
+            # Preserve the original connection/cancellation failure if the
+            # cleanup write encounters an already closed Windows pipe.
+            with contextlib.suppress(H324Error, BrokenPipeError, ConnectionResetError):
+                await asyncio.shield(self._hangup())
             raise
 
     async def dial(self, number: str) -> Call:
@@ -338,7 +342,11 @@ class AsyncModem:
             if self._call is not None:
                 with contextlib.suppress(H324Error, BrokenPipeError, ConnectionResetError):
                     await self._call.stop()
-            await self._command('shutdown')
+            # Proactor transports may report ConnectionResetError while the
+            # worker has already exited but returncode is not populated yet.
+            # Reap it below even when no shutdown command can be delivered.
+            with contextlib.suppress(H324Error, BrokenPipeError, ConnectionResetError):
+                await self._command('shutdown')
             try:
                 await asyncio.wait_for(process.wait(), 18)
             except asyncio.TimeoutError:

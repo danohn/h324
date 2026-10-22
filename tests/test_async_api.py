@@ -144,3 +144,34 @@ async def test_context_exit_cancels_active_source(tmp_path):
 def test_profile_string_is_normalized():
     config = ModemConfig('COM3', profile='cx93001-v80-14400')
     assert config.profile.value == 'cx93001-v80-14400'
+
+
+@pytest.mark.parametrize('pipe_error', [BrokenPipeError, ConnectionResetError])
+async def test_close_reaps_worker_after_pipe_reset(pipe_error):
+    class Stdin:
+        def write(self, data): pass
+        async def drain(self): raise pipe_error('pipe closed before exit was reaped')
+    class Process:
+        returncode = None
+        stdin = Stdin()
+        waited = False
+        async def wait(self):
+            self.waited = True
+            self.returncode = 0
+            return 0
+    process = Process()
+    modem = AsyncModem(ModemConfig('COM3'))
+    modem._process = process
+    await modem.close()
+    assert process.waited
+    assert modem._process is None
+
+
+async def test_connection_cleanup_pipe_reset_preserves_original_error():
+    modem = AsyncModem(ModemConfig('COM3'))
+    async def command(op, **fields):
+        if op == 'dial': raise H324Error('original connection failure')
+        raise ConnectionResetError('secondary cleanup pipe reset')
+    modem._command = command
+    with pytest.raises(H324Error, match='original connection failure'):
+        await modem.dial('1')
