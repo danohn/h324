@@ -6,8 +6,8 @@ manufacturer's H.324 terminal.
 
 ## Automated software checks
 
-The [core matrix run](https://github.com/danohn/h324/actions/runs/39726104180)
-passed **254 tests per job** against installed wheels on all twelve combinations
+The [core matrix run](https://github.com/danohn/h324/actions/runs/39727978028)
+passed **284 tests per job** against installed wheels on all twelve combinations
 of Python 3.11, 3.12, 3.13 and 3.14 with Ubuntu 24.04, macOS 15 and Windows 2022.
 Checks run outside the source checkout. The library environment includes neither
 Qt nor FFmpeg. CLI startup, worker startup and the installed H.245 resource are
@@ -18,7 +18,7 @@ The extracted projects retain the portable application/protocol tests; historica
 V.34 experiments, PBX utilities and capture-analysis diagnostics remain in that
 archive. Test totals across the new projects must not be described as a direct
 replacement of all 191 historical tests. The current core total consists of 141
-migrated tests and 113 new tests.
+migrated tests and 143 new tests.
 
 ## Physical macOS check
 
@@ -142,9 +142,21 @@ Mac-side metadata recorded 608.61 seconds of continuous outgoing audio, 20,287
 1,172 received picture starts. Actual rate evidence was 14,400 bps. There were
 no active underruns, overruns, H.223 framing/reassembly errors or session failure;
 the transmit queue peaked at 685 bytes. Mac restoration and port release were
-confirmed. Windows-side logs, its exact OS build and modem driver have not been
-independently verified. The video delay and repeated encoder overload pauses
-remain documented client limitations; this result is not a latency acceptance.
+confirmed. The subsequently supplied Windows log independently confirmed 14,400
+bps, 633.75 seconds of consecutive outgoing audio before the hangup error,
+20,283 received audio frames and 700 received picture starts. Windows restoration
+also succeeded, with its priority/timer settings released. Its exact OS build
+and modem driver remain unverified.
+
+At Mac hangup, Windows recorded one H.223 abort sequence with a partial video
+SDU. Capture then continued while an error dialog was open, producing 246 stale
+"No connected call" errors. Both modems restored, but orderly remote disconnect
+acceptance **failed** and requires a corrected-build retest. Core `3547027` now
+drains accepted media, closes H.245 channels and exchanges EndSession before
+modem teardown. Automated delayed-transport tests cover either channel owner,
+simultaneous closure and bounded cleanup; they do not replace the physical
+Windows retest. The video delay and repeated encoder overload pauses remain
+documented client limitations; this result is not a latency acceptance.
 
 Physical Linux modem and capture-device verification is **unverified** until
 hardware is available. Native launch and camera/microphone results belong to the
