@@ -36,6 +36,33 @@ initial acquisition; subsequent captured bits matched the transmitted stream.
 The application aborted and restored the modems. Framing errors remain fatal;
 this failure is retained as a known startup-reliability limitation.
 
+## Installed async API physical check
+
+A wheel built from `5b12998` was installed into a clean Python 3.14 environment
+and used outside either repository, without Qt or FFmpeg in that environment.
+Two `AsyncModem` contexts independently negotiated a physical call and sent
+different six-second prepared streams simultaneously. Event consumers ran
+concurrently, and the caller paused and resumed its source once.
+
+| Measurement | Endpoint A | Endpoint B |
+|---|---:|---:|
+| Actual transmit and receive bearer rate | 14,400 bps | 14,400 bps |
+| Received G.723.1 frames / bytes | 200 / 4,800 | 200 / 4,800 |
+| Received H.263 pictures / AL3 SDUs | 12 / 15 | 12 / 15 |
+| Received H.263 bytes | 572 | 594 |
+| Codec bytes equal the peer's selected source | Yes | Yes |
+| Active transmit underruns | 0 | 0 |
+| H.223 framing/demultiplexer errors | 0 | 0 |
+| Transmit queue high-water mark | 362 bytes | 362 bytes |
+| Modem restoration confirmed | Yes | Yes |
+
+The entire operation, including connection setup and restoration, took
+**58.98 seconds**. Both calls hung up, both worker contexts exited, and both
+serial ports were independently confirmed released. This validates the
+installed async API and encoded-media lifecycle on the same macOS/CX93001
+hardware profile; it does not imply camera or independent-terminal acceptance.
+Raw evidence remains in the private lab archive.
+
 ## Verification boundaries
 
 Physical Windows modem verification is pending the maintainer's manual test.
