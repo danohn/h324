@@ -24,6 +24,8 @@ for line in sys.stdin:
    emit('state',state='connected',message='connected')
    if mode == 'overflow':
     for i in range(40): emit('media',lcn=1,payload='AAAA')
+ elif op == 'live_start' and mode.startswith('disconnect_'):
+  emit('state',state=mode[len('disconnect_'):],message='remote modem ended call')
  elif op == 'hangup': emit('state',state='idle',message='restored')
  elif op == 'shutdown':
   emit('closed')
@@ -175,3 +177,25 @@ async def test_connection_cleanup_pipe_reset_preserves_original_error():
     modem._command = command
     with pytest.raises(H324Error, match='original connection failure'):
         await modem.dial('1')
+
+
+@pytest.mark.parametrize('state', ['hanging_up', 'idle', 'error'])
+async def test_remote_disconnect_cancels_waiting_source_without_consumer_reaction(tmp_path, state):
+    command, record = worker(tmp_path, 'disconnect_'+state)
+    released = asyncio.Event()
+    async with AsyncModem(ModemConfig('COM3'), worker_command=command) as modem:
+        call = await modem.dial('1')
+        async def source():
+            try:
+                await asyncio.Event().wait()
+                if False:
+                    yield None
+            finally:
+                released.set()
+        with pytest.raises(H324Error, match='disconnected'):
+            await asyncio.wait_for(call.send(source()), 2)
+        assert released.is_set()
+        # No consumer needs to react and no new live chunks/end writes are sent
+        # into a worker that is already restoring a remotely closed call.
+        assert 'live_chunk' not in commands(record)
+        assert 'live_stop' not in commands(record)

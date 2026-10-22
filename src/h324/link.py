@@ -22,12 +22,12 @@ class Link:
     Keep bit packing continuous while allowing audio between video fragments.
     The encoded residual is at most one fragment; abstract queues are bounded.
     """
-    def __init__(self, log, max_queued=32768):
+    def __init__(self, log, max_queued=32768, *, startup_hunt=False):
         self.log = log
         self.tx_table, self.rx_table = Table(), Table()
         self.mux = Multiplexer(self.tx_table, {0, 2})
         self.demux = Demultiplexer(self.rx_table, {0, 2}, {0})
-        self.encoder, self.framer, self.decoder = WireEncoder(), Framer(), Decoder()
+        self.encoder, self.framer, self.decoder = WireEncoder(), Framer(startup_hunt=startup_hunt), Decoder()
         self.queues = [deque(), deque(), deque()]
         self.encoded = bytearray(self.encoder.idle(16))
         self.max_queued = max_queued
@@ -101,7 +101,13 @@ class Link:
             demux_counts=dict(self.demux.counts),demux_events=list(self.demux.events),
             partial_sdu_bytes={str(k):len(v) for k,v in self.demux.partial.items()},
             queue_high_water_bytes=self.high_water,queued_bytes=self.queued_bytes,
-            active_underruns=self.active_underruns)
+            active_underruns=self.active_underruns,
+            startup_acquisition=dict(acquiring=self.framer.acquiring,
+                locked_bit_offset=self.framer.startup_locked_offset,
+                rejected_candidates=sum(self.framer.startup_counts.values()),
+                rejection_counts=dict(self.framer.startup_counts),
+                rejections=list(self.framer.startup_errors),
+                timed_out=self.framer.startup_timed_out))
 
 
 def control_payloads(sender, count=8):

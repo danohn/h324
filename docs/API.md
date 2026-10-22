@@ -141,3 +141,29 @@ are available. The CI matrix tests Python 3.11–3.14 on macOS, Windows and Linu
 it does not substitute for real modem/driver testing or independent terminal
 interoperability. This finite profile has no channel renegotiation,
 end-session handshake or universal modem compatibility claim.
+
+## Physical modem startup acquisition
+
+The physical worker sends **one second of consecutive full H.223 idle flags**
+before releasing its queued SRP traffic. H.223 (03/1996), clause 6.3.1, permits
+consecutive flags and defines the complete flag as `01111110`; the implementation
+does not reinterpret a seven-bit interval as a valid flag or repair payload bits.
+
+The worker enables a bounded initial hunt. It requires eight consecutive full
+flags followed by a structurally valid, nonempty MC0 control PDU. Rejected
+acquisition candidates are recorded separately in the `acquisition` events and
+`transport.startup_acquisition` summary. The first accepted PDU immediately
+locks strict framing, including for any later error in the same USB read.
+Post-lock framing errors remain fatal. The ordinary `Framer()` API retains its
+strict behavior unless `startup_hunt=True` is explicitly requested.
+
+Acquisition fails after **five seconds of wall time or 72,000 received bits**,
+whichever is reached first. Empty reads cannot postpone the wall-time limit.
+This is an explicit startup policy for the tested modem profile, rather than
+a claim that all H.324 peers must send an eight-flag training sequence.
+
+The async media producer is automatically cancelled when the remote call starts
+hanging up or enters idle/error, including when the producer is awaiting a new
+capture frame. `send()` then raises `H324Error`; the event reader requests this
+cancellation without awaiting producer teardown, so serial/IPC draining can
+continue. No new chunks or source-end writes are sent after that disconnect.

@@ -90,6 +90,7 @@ class Call:
         self._modem = modem
         self._send_active = False
         self._sender = None
+        self._disconnect_error: H324Error | None = None
         self._resume_gate = asyncio.Event()
         self._resume_gate.set()
 
@@ -99,6 +100,11 @@ class Call:
             yield event
             if event.kind == 'closed' or event.kind == 'state' and event.data.get('state') in ('idle', 'error'):
                 break
+
+    def _disconnected(self, message: str) -> None:
+        if self._sender is not None and not self._sender.done():
+            self._disconnect_error = H324Error('Call disconnected: ' + message)
+            self._sender.cancel()
 
     def _require_connected(self) -> None:
         if not self._modem._active or self._modem._call is not self:
@@ -114,15 +120,20 @@ class Call:
             await self._modem._command('live_start', label=label)
             async for chunk in source:
                 await self._resume_gate.wait()
+                self._require_connected()
                 if not isinstance(chunk, MediaChunk):
                     raise TypeError('send() expects MediaChunk values')
                 await self._modem._command('live_chunk', lcn=chunk.lcn,
                     payload=base64.b64encode(chunk.payload).decode('ascii'),
                     timestamp_ms=chunk.timestamp_ms, duration_ms=chunk.duration_ms)
+        except asyncio.CancelledError:
+            if self._disconnect_error is not None:
+                raise self._disconnect_error from None
+            raise
         finally:
             self._send_active = False
             self._sender = None
-            if self._modem._process is not None and self._modem._process.returncode is None:
+            if self._disconnect_error is None and self._modem._process is not None and self._modem._process.returncode is None:
                 # Preserve a source/worker exception; cleanup must not replace it
                 # with a secondary broken pipe. Context exit still owns teardown.
                 with contextlib.suppress(H324Error, BrokenPipeError, ConnectionResetError):
@@ -222,6 +233,8 @@ class AsyncModem:
                 payload = base64.b64decode(value['payload'], validate=True) if kind == 'media' else None
                 event = CallEvent(kind, value, payload)
                 if kind == 'state':
+                    if value.get('state') in ('hanging_up', 'idle', 'error') and self._call is not None:
+                        self._call._disconnected(str(value.get('message', value['state'])))
                     if value.get('state') == 'connected':
                         self._connected.set()
                     if value.get('state') in ('idle', 'error'):
@@ -258,6 +271,8 @@ class AsyncModem:
         except (ValueError, KeyError, OSError, H324Error) as exc:
             self._failure = H324Error(str(exc))
         finally:
+            if self._call is not None:
+                self._call._disconnected(str(self._failure or 'worker output closed'))
             self._ready.set()
             self._connected.set()
             if self._failure:

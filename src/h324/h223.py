@@ -123,8 +123,10 @@ class Framer:
     A seven-one run loses framing. Pure all-one modem underrun fill is counted
     separately; no received payload is repaired. Other invalid candidates are
     explicit errors. Error history is bounded, counters are cumulative.
+    Opt-in startup_hunt records acquisition rejects separately until eight full
+    flags and a valid initial control PDU; all subsequent errors remain strict.
     """
-    def __init__(self, max_information=4096, xor_information=False):
+    def __init__(self, max_information=4096, xor_information=False, *, startup_hunt=False, max_startup_bits=72000):
         if not 1 <= max_information <= 65535:
             raise ValueError('max_information must be 1..65535')
         self.max_information = max_information
@@ -134,11 +136,34 @@ class Framer:
         self.errors = deque(maxlen=256)
         self.counts = Counter()
         self.discontinuity = False
+        if max_startup_bits < 64:
+            raise ValueError('startup bit budget must allow at least eight flags')
+        self.acquiring = bool(startup_hunt)
+        self.max_startup_bits = max_startup_bits
+        self.startup_errors = deque(maxlen=256)
+        self.startup_counts = Counter()
+        self.startup_flag_run = 0
+        self.startup_locked_offset = None
+        self.startup_timed_out = False
 
     def _error(self, name):
+        if self.acquiring:
+            self.startup_errors.append(dict(error=name, bit_offset=self.opening))
+            self.startup_counts[name] += 1
+            self.counts['startup_rejected_candidates'] += 1
+            self.startup_flag_run = 0
+            return
         self.errors.append(dict(error=name, bit_offset=self.opening))
         self.counts[name] += 1
         self.discontinuity = True
+
+    def expire_startup(self, reason='startup_acquisition_timeout'):
+        if self.acquiring:
+            self.acquiring = False
+            self.startup_timed_out = True
+            self._error(reason)
+            self.opening = None
+            self.buffer = ''
 
     def feed(self, data):
         return self.feed_bits(bits(data))
@@ -146,11 +171,18 @@ class Framer:
     def feed_bits(self, value):
         if set(value) - {'0', '1'}:
             raise ValueError('binary bits required')
+        if self.startup_timed_out:
+            return []
         # Bound each working chunk even if a caller supplies a giant buffer.
         result = []
         for start in range(0, len(value), 2048):
             self.buffer += value[start:start+2048]
             result.extend(self._consume())
+            if self.startup_timed_out:
+                break
+            if self.acquiring and self.offset + len(self.buffer) >= self.max_startup_bits:
+                self.expire_startup()
+                break
         return result
 
     def _consume(self):
@@ -163,6 +195,7 @@ class Framer:
                 elif len(self.buffer) > self.max_bits:
                     self._error('oversized_pdu')
                     self.opening = None
+                    self.startup_flag_run = 0
                     n = max(0, len(self.buffer) - 7)
                 elif '1111111' in self.buffer:
                     if set(self.buffer) <= {'1'}:
@@ -170,6 +203,7 @@ class Framer:
                     else:
                         self._error('abort_sequence')
                     self.opening = None
+                    self.startup_flag_run = 0
                     n = max(0, len(self.buffer) - 7)
                 else:
                     break
@@ -193,6 +227,17 @@ class Framer:
                     info = raw[1:]
                     if self.xor_information:
                         info = bytes(b ^ (mc << 1) for b in info)
+                    if self.acquiring:
+                        if self.offset + i + 8 > self.max_startup_bits:
+                            self.expire_startup()
+                            return output
+                        if self.startup_flag_run < 8:
+                            raise ValueError('startup_flag_train_required')
+                        if mc != 0 or not info:
+                            raise ValueError('startup_control_pdu_required')
+                        self.acquiring = False
+                        self.startup_locked_offset = self.opening
+                        self.counts['startup_acquired'] += 1
                     output.append(PDU(mc, pm, info, self.opening, self.discontinuity))
                     self.discontinuity = False
                     self.counts['pdus'] += 1
@@ -203,6 +248,8 @@ class Framer:
                         self._error(str(exc))
             elif self.opening is not None:
                 self.counts['idle_flags'] += 1
+            if self.acquiring:
+                self.startup_flag_run = self.startup_flag_run + 1 if self.opening is not None and not candidate else 1
             self.opening = self.offset + i
             self.buffer = self.buffer[i+8:]
             self.offset += i + 8

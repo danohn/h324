@@ -214,7 +214,7 @@ class Worker:
                                         check_cancel=self._check_cancel)
         configure(self.modem, 'V32B', 'rts')
         self.settings = {'configured_mode': 'V32B', 'configured_rate': 14400}
-        self.session = StreamingSession(self._session_event, self.modem.log)
+        self.session = StreamingSession(self._session_event, self.modem.log, startup_hunt=True)
         self.files = {name: (directory / filename).open('wb') if directory else NullCapture()
                       for name, filename in (('audio', 'received-audio.g723'),
                                              ('video', 'received-video.h263'),
@@ -251,6 +251,11 @@ class Worker:
                 self.connected_at = now
                 self.set_state('negotiating', 'Carrier connected; negotiating audio and video')
                 self.session.start(now)
+                # H.223 6.3.1 permits consecutive full flags. Let V.80/remote
+                # carrier acquisition settle before sending any queued SRP.
+                self.protocol_release_at = now + 1.0
+                self.acquisition_deadline = now + 5.0
+                self.emit(event='acquisition', phase='hunt', idle_preamble_ms=1000, timeout_ms=5000)
                 if self.connect_buffer:
                     self._feed(bytes(self.connect_buffer), now)
                     self.connect_buffer.clear()
@@ -280,6 +285,16 @@ class Worker:
                 raise Cancelled('Remote modem ended the call')
             elif status['name'] in ('abort', 'frame_error', 'tover', 'rover', 'unknown'):
                 raise RuntimeError('V.80 transport error: ' + status['name'])
+        if getattr(self, 'acquisition_deadline', None) is not None:
+            if self.session.link.framer.startup_timed_out:
+                raise TimeoutError('H.223 startup acquisition exceeded its received-bit budget')
+            if not self.session.link.framer.acquiring:
+                self.emit(event='acquisition', phase='locked',
+                          **self.session.link.summary()['startup_acquisition'])
+                self.acquisition_deadline = None
+            elif now >= self.acquisition_deadline:
+                self.session.link.framer.expire_startup('startup_wall_time_timeout')
+                raise TimeoutError('H.223 startup acquisition did not lock within five seconds')
         if self.session.link.active_underruns:
             raise RuntimeError('Synchronous transmit underrun; call stopped to avoid corrupt playback')
         if self.session.link.framer.errors or self.session.link.demux.events:
@@ -288,7 +303,10 @@ class Worker:
             raise RuntimeError(self.session.failure)
 
     def _send(self, count, now):
-        data = self.session.link.pull(count)
+        if now < getattr(self, 'protocol_release_at', 0):
+            data = self.session.link.encoder.idle(count)
+        else:
+            data = self.session.link.pull(count)
         self.modem.send(shield(data))
         self.files['tx'].write(data)
         self.tx_bytes += len(data)

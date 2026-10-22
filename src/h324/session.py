@@ -15,10 +15,10 @@ from h324.al3 import Transmitter, decode as decode_al3
 
 
 class StreamingSession:
-    def __init__(self, emit=None, log=None, *, status_number=None, max_queued=8192):
+    def __init__(self, emit=None, log=None, *, status_number=None, max_queued=8192, startup_hunt=False):
         self.emit = emit or (lambda **event: None)
         self.log = log or (lambda *args, **fields: None)
-        self.link = Link(self.log, max_queued=max_queued)
+        self.link = Link(self.log, max_queued=max_queued, startup_hunt=startup_hunt)
         self.srp = SRP(timeout=2, max_retries=5, max_pending=32)
         self.h245 = H245(status_number=status_number, timeout=30)
         self.al3_tx = Transmitter(control_size=1, send_buffer_size=4096, max_sdu=96)
