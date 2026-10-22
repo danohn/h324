@@ -98,6 +98,25 @@ ARQ timers and generalized loss recovery remain outside this profile.
 
 ## Worker IPC and packaged helpers
 
+`h324.media.AviPictureParser` extracts H.263 packets from the local encoder's
+single-stream, 128×96 AVI output. `feed(bytes)` returns packet bytes immediately
+when each `00dc` chunk and its RIFF padding arrive, avoiding the next-picture
+lookahead needed with a bare H.263 byte stream. The AVI container stays local;
+the modem receives the same H.263 bytes and 96-byte AL3 segmentation as before.
+It validates the declared H263 video stream and packet start-code count, rather
+than implementing full H.263 macroblock validation. Codec syntax errors remain
+the decoder's responsibility.
+
+The parser exposes `buffered_bytes`, `reset()` and `finish()`. Defaults bound
+header/metadata to 64 KiB and individual pictures to 8192 bytes. It accepts finite
+RIFF/movi lengths and FFmpeg's nonseekable `0xffffffff` length sentinel, consumes
+odd-byte padding and skips empty AVI frame placeholders. Unsupported streams,
+oversized chunks, inconsistent boundaries and truncated EOF fail explicitly;
+`reset()` is required after failure or completed EOF. It intentionally rejects
+nested movie record lists and OpenDML continuation files. The framing follows
+[Microsoft's AVI RIFF reference](https://learn.microsoft.com/en-us/windows/win32/directshow/avi-riff-file-reference)
+and [FFmpeg's AVI muxer](https://github.com/FFmpeg/FFmpeg/blob/n9.0.1/libavformat/avienc.c).
+
 The supported local interface is JSON lines over stdin/stdout. Every event has
 `protocol_version: 1`; clients should send that version on every command.
 Source commands launch `python -m h324.worker --station NAME`. Compiled clients

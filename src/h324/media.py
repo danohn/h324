@@ -9,6 +9,7 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+from h324.avi import AviPictureParser
 
 if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
