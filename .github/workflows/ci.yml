@@ -31,9 +31,9 @@ jobs:
           uv run --no-project scripts/audit_release.py dist/*
       - name: Install wheel and test dependencies
         run: |
-          uv venv .venv --python '${{ matrix.python }}'
-          uv pip install --python .venv dist/*.whl pytest pytest-asyncio twine
-          H324_TEST_PYTHON=$(uv python find "$GITHUB_WORKSPACE/.venv")
+          uv venv "$RUNNER_TEMP/test venv" --python '${{ matrix.python }}'
+          uv pip install --python "$RUNNER_TEMP/test venv" dist/*.whl pytest pytest-asyncio twine
+          H324_TEST_PYTHON=$(uv python find "$RUNNER_TEMP/test venv")
           echo "H324_TEST_PYTHON=$H324_TEST_PYTHON" >> "$GITHUB_ENV"
       - name: Test installed wheel outside checkout
         working-directory: ${{ runner.temp }}
