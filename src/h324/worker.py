@@ -26,7 +26,7 @@ from h324.h245 import codec
 from h324.session import StreamingSession
 from h324.api import PROTOCOL_VERSION, ModemProfile
 from h324.activity import CallActivity
-from h324.timing import PacerMetrics, TransmitClock
+from h324.timing import PacerMetrics, TransmitClock, CollectionMetrics
 
 
 class NullCapture:
@@ -135,6 +135,7 @@ class Worker:
         self.activity = None
         self.activity_report = None
         self.timing = PacerMetrics()
+        self.gc_metrics = CollectionMetrics()
         self.transmit_clock = None
 
     def emit(self, **event):
@@ -412,7 +413,7 @@ class Worker:
     def telemetry(self, now):
         s = self.session
         self.emit(event='telemetry', rate=self.rate, carrier_report=self.carrier_report,
-                  timing=self.timing.summary(), activity=self.activity_report,
+                  timing=self.timing.summary(), gc=self.gc_metrics.summary(), activity=self.activity_report,
                   elapsed=now-self.connected_at if self.connected_at is not None else 0,
                   tx_bytes=self.tx_bytes, rx_bytes=self.rx_bytes,
                   carrier=self.connected_at is not None,
@@ -455,7 +456,8 @@ class Worker:
                 error = (error + '; ' if error else '') + 'Modem idle/profile restoration was not confirmed'
             self._release_activity()
             result = dict(station=self.station, error=error, cleanup_ok=cleanup_ok,
-                          timing=self.timing.summary(history=True), activity=self.activity_report,
+                          timing=self.timing.summary(history=True), gc=self.gc_metrics.summary(history=True),
+                          activity=self.activity_report,
                           tx_bytes=self.tx_bytes, rx_bytes=self.rx_bytes, rate=self.rate,
                           last_rate_status=self.last_rate_status, carrier_report=self.carrier_report,
                           negotiation=self.negotiation,
@@ -481,6 +483,7 @@ class Worker:
     def run(self):
         self.set_state('initializing', 'Loading conferencing protocols')
         codec()  # Compile PER before any modem is open or serial pacer is active.
+        self.gc_metrics.install()
         self.set_state('idle', 'Choose a modem, then Call or Answer')
         next_telemetry = 0
         try:
@@ -553,7 +556,10 @@ class Worker:
                     continue
                 time.sleep(.002 if self.modem else .02)
         finally:
-            self._cleanup()
+            try:
+                self._cleanup()
+            finally:
+                self.gc_metrics.close()
             self.emit(event='closed', station=self.station)
 
 

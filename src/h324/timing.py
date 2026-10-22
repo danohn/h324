@@ -102,3 +102,60 @@ class TransmitClock:
         if not 0 < octets <= self.MAX_QUANTA*self.QUANTUM or octets % self.QUANTUM:
             raise ValueError('Transmit clock advances require one to three complete quanta')
         self.next_tick += octets//self.QUANTUM
+
+
+class CollectionMetrics:
+    """Measure actual GC stop intervals without disabling or forcing collection."""
+    def __init__(self):
+        import threading
+        self._lock = threading.RLock()
+        self._started = {}
+        self.recent = deque(maxlen=32)
+        self.counts = Counter()
+        self.max_ms = 0.0
+        self.total_ms = 0.0
+        self.epoch_ns = None
+        self.installed = False
+
+    def callback(self, phase, info):
+        import time
+        now = time.monotonic_ns()
+        generation = info.get('generation', -1)
+        with self._lock:
+            if phase == 'start':
+                self._started[generation] = now
+            elif phase == 'stop':
+                started = self._started.pop(generation, None)
+                if started is None:
+                    return
+                elapsed = (now-started)/1_000_000
+                self.max_ms = max(self.max_ms, elapsed)
+                self.total_ms += elapsed
+                self.counts[str(generation)] += 1
+                self.recent.append(dict(generation=generation,
+                    start_s=round((started-(self.epoch_ns or started))/1_000_000_000, 6),
+                    duration_ms=round(elapsed, 3), collected=info.get('collected', 0),
+                    uncollectable=info.get('uncollectable', 0)))
+
+    def install(self):
+        import gc
+        import time
+        if not self.installed:
+            self.epoch_ns = time.monotonic_ns()
+            gc.callbacks.append(self.callback)
+            self.installed = True
+
+    def close(self):
+        import gc
+        if self.installed:
+            gc.callbacks.remove(self.callback)
+            self.installed = False
+
+    def summary(self, history=False):
+        with self._lock:
+            result = dict(counts=dict(self.counts), max_pause_ms=round(self.max_ms, 3),
+                          total_pause_ms=round(self.total_ms, 3),
+                          clock='monotonic; offsets since worker GC observer installation')
+            if history:
+                result['recent'] = list(self.recent)
+            return result

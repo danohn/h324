@@ -110,3 +110,34 @@ def test_pacer_history_and_telemetry_size_stay_bounded_over_long_call():
     assert len(meter.history) == 64
     assert len(json.dumps(meter.summary())) < 2000
     assert len(json.dumps(meter.summary(history=True))) < 25000
+
+
+def test_gc_observer_records_duration_and_uninstalls_without_disabling_gc(monkeypatch):
+    import gc
+    import time
+    from h324.timing import CollectionMetrics
+    meter = CollectionMetrics()
+    before = list(gc.callbacks)
+    enabled = gc.isenabled()
+    meter.install()
+    assert meter.callback in gc.callbacks
+    meter.callback('start', dict(generation=2))
+    time.sleep(.001)
+    meter.callback('stop', dict(generation=2, collected=3, uncollectable=0))
+    result = meter.summary(history=True)
+    assert result['max_pause_ms'] >= 1
+    assert result['counts']['2'] >= 1
+    assert result['recent'][-1]['collected'] == 3
+    meter.close()
+    meter.close()
+    assert gc.callbacks == before
+    assert gc.isenabled() == enabled
+
+
+def test_gc_observer_history_is_bounded():
+    from h324.timing import CollectionMetrics
+    meter = CollectionMetrics()
+    for i in range(100):
+        meter.callback('start', dict(generation=0))
+        meter.callback('stop', dict(generation=0, collected=0))
+    assert len(meter.summary(history=True)['recent']) == 32
