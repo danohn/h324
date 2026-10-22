@@ -53,13 +53,15 @@ class PacerMetrics:
             self.counts['cts_transitions'] += 1
         self.last_serial = serial_after
         self.counts['writes'] += 1
+        if wire_bytes > 36 and wire_bytes != 216:
+            self.counts['debt_batch_writes'] += 1
         self.history.append(dict(at_s=round(after-self.started, 6), kind='write',
             write_ms=round(write_ms, 3), late_ms=round(late_ms, 3),
             wire_bytes=wire_bytes, serial_bytes=serial_bytes,
             nominal_lead_ms=round(lead_ms, 3), before=serial_before, after=serial_after))
 
     def summary(self, history=False):
-        result = dict(algorithm='36-octets-per-20ms-plus-216-prefill',
+        result = dict(algorithm='36-octets-per-20ms-debt-batches-max108-plus216-prefill',
             clock='monotonic', counts=dict(self.counts),
             max_loop_gap_ms=round(self.max_gap_ms, 3), max_write_ms=round(self.max_write_ms, 3),
             max_read_ms=round(self.max_read_ms, 3), max_protocol_ms=round(self.max_protocol_ms, 3),
@@ -70,3 +72,33 @@ class PacerMetrics:
         if history:
             result['recent'] = list(self.history)
         return result
+
+
+class TransmitClock:
+    """Repay overdue line quanta in bounded batches without changing the rate.
+
+    Integer epoch-relative deadlines avoid accumulated floating-point error.
+    At most three 36-octet quanta are selected per service, leaving a chance to
+    drain receive data between batches. No nominal rate bias or buffer feedback
+    is inferred from CTS or the host's queue estimate.
+    """
+    QUANTUM = 36
+    PERIOD_NS = 20_000_000
+    MAX_QUANTA = 3
+
+    def __init__(self, epoch_ns):
+        self.epoch_ns = int(epoch_ns)
+        self.next_tick = 1
+
+    @property
+    def deadline_ns(self):
+        return self.epoch_ns + self.next_tick*self.PERIOD_NS
+
+    def due(self, now_ns):
+        overdue = (int(now_ns)-self.epoch_ns)//self.PERIOD_NS-self.next_tick+1
+        return max(0, min(self.MAX_QUANTA, overdue))*self.QUANTUM
+
+    def advance(self, octets):
+        if not 0 < octets <= self.MAX_QUANTA*self.QUANTUM or octets % self.QUANTUM:
+            raise ValueError('Transmit clock advances require one to three complete quanta')
+        self.next_tick += octets//self.QUANTUM

@@ -53,7 +53,9 @@ class Modem:
 
     def send(self, data):
         self.log("tx", hex=data.hex(), text=data.decode("ascii", errors="backslashreplace"))
-        self.port.write(data)
+        written = self.port.write(data)
+        if written != len(data):
+            raise OSError(f"Serial write accepted only {written} of {len(data)} octets")
 
     def read(self):
         data = self.port.read(self.port.in_waiting)

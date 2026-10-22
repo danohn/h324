@@ -77,3 +77,11 @@ def test_cleanup_event_without_recording(monkeypatch):
     assert cleanup['cleanup_ok'] is True and cleanup['error'] is None
     assert worker.directory is None
     assert events.index(cleanup) < next(i for i,e in enumerate(events) if e.get('state') == 'idle')
+
+
+def test_short_serial_write_is_fatal_instead_of_counted_as_complete():
+    modem = serial_modem.Modem.__new__(serial_modem.Modem)
+    modem.port = SimpleNamespace(write=lambda data: len(data)-1)
+    modem.log = lambda *a, **k: None
+    with pytest.raises(OSError, match='only 3 of 4'):
+        modem.send(b'test')

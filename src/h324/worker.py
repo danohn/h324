@@ -26,7 +26,7 @@ from h324.h245 import codec
 from h324.session import StreamingSession
 from h324.api import PROTOCOL_VERSION, ModemProfile
 from h324.activity import CallActivity
-from h324.timing import PacerMetrics
+from h324.timing import PacerMetrics, TransmitClock
 
 
 class NullCapture:
@@ -135,6 +135,7 @@ class Worker:
         self.activity = None
         self.activity_report = None
         self.timing = PacerMetrics()
+        self.transmit_clock = None
 
     def emit(self, **event):
         if self.ipc_overload:
@@ -212,6 +213,7 @@ class Worker:
         self.last_error = None
         self.rate = self.last_rate_status = self.connected_at = None
         self.next_send = None
+        self.transmit_clock = None
         self.carrier_report = None
         self.last_tx = self.last_rx = None
         self.tx_bytes = self.rx_bytes = 0
@@ -280,7 +282,8 @@ class Worker:
                     self.connect_buffer.clear()
                 self.modem.send(b'\x19\xb0')  # Explicit transparent submode.
                 self._send(216, now)
-                self.next_send = now + .02
+                self.transmit_clock = TransmitClock(round(now*1_000_000_000))
+                self.next_send = self.transmit_clock.deadline_ns/1_000_000_000
                 return
 
     def _feed(self, raw, now):
@@ -346,6 +349,17 @@ class Worker:
         self.files['tx'].write(data)
         self.tx_bytes += len(data)
         self.last_tx = now
+
+    def _send_due(self):
+        if self.modem is None or self.connected_at is None or self.transmit_clock is None:
+            return
+        now_ns = time.monotonic_ns()
+        count = self.transmit_clock.due(now_ns)
+        if count:
+            self.next_send = self.transmit_clock.deadline_ns/1_000_000_000
+            self._send(count, now_ns/1_000_000_000)
+            self.transmit_clock.advance(count)
+            self.next_send = self.transmit_clock.deadline_ns/1_000_000_000
 
     def _load_bundle(self, path, generation):
         # File parsing/hash checks never occupy the tightly timed serial loop.
@@ -490,6 +504,9 @@ class Worker:
                     if self.modem is not None:
                         now = time.monotonic()
                         self.timing.loop(now)
+                        # Refill overdue line bytes before USB reads or protocol
+                        # work can spend the remaining modem headroom.
+                        self._send_due()
                         read_started = time.monotonic()
                         raw = self.modem.read()
                         self.timing.read(read_started, time.monotonic())
@@ -500,15 +517,14 @@ class Worker:
                         else:
                             protocol_started = time.monotonic()
                             try:
-                                self._feed(raw, now)
-                                self.session.tick(now)
+                                self._feed(raw, protocol_started)
+                                self.session.tick(time.monotonic())
                             finally:
                                 self.timing.protocol(protocol_started, time.monotonic())
                             if self.session.failure:
                                 raise RuntimeError(self.session.failure)
-                            if now >= self.next_send:
-                                self._send(36, now)
-                                self.next_send += .02
+                            # Protocol processing may itself span a deadline.
+                            self._send_due()
                     try:
                         generation, sdus, manifest, load_error = self.bundle_result.get_nowait()
                     except queue.Empty:
@@ -530,6 +546,11 @@ class Worker:
                 except Exception as exc:
                     self.emit(event='error', message=str(exc))
                     self._cleanup(str(exc))
+                if (self.modem is not None and self.connected_at is not None and
+                        self.transmit_clock is not None and self.transmit_clock.due(time.monotonic_ns())):
+                    # Keep draining RX between bounded batches, but do not add
+                    # an intentional sleep while already behind the line clock.
+                    continue
                 time.sleep(.002 if self.modem else .02)
         finally:
             self._cleanup()

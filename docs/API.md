@@ -221,5 +221,19 @@ explicitly an **estimate**, not a measurement of the modem's buffer or crystal
 clock. These observations allow scheduler stalls, flow-control blocking and
 possible clock drift to be distinguished without retaining raw audio/video.
 
-The established 216-octet prefill and 36 octets per 20 ms schedule remain
-unchanged. Active V.80 underruns, framing errors and overruns remain fatal.
+The 216-octet prefill and mean rate of 36 octets per 20 ms remain unchanged.
+Overdue quanta are repaid in batches of at most **108 wire octets**, whose
+worst-case EM-shielded size is 216 serial octets, below the profile's 255-octet
+transmit flow-control threshold. An integer monotonic epoch and tick index
+preserve the mean rate without accumulated floating-point deadlines or an
+unmeasured positive clock bias. Submission failures do not advance the clock.
+
+The worker services overdue transmit bytes before receive reads/protocol work
+and again after protocol work. It drains RX between bounded repayment batches
+and adds no deliberate sleep while already behind. This prevents a cluster of
+moderate scheduler stalls from becoming an increasing queue of one-quantum
+repayments. Unit models replay the observed stall cluster with explicit USB
+delivery lag and finite occupancy, and repeat bounded stalls over ten simulated
+minutes. Their occupancy and delivery lag are model assumptions, not measured
+firmware values or substitutes for physical acceptance. Short serial writes,
+active V.80 underruns, framing errors and overruns remain fatal.
