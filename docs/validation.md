@@ -151,12 +151,38 @@ and modem driver remain unverified.
 At Mac hangup, Windows recorded one H.223 abort sequence with a partial video
 SDU. Capture then continued while an error dialog was open, producing 246 stale
 "No connected call" errors. Both modems restored, but orderly remote disconnect
-acceptance **failed** and requires a corrected-build retest. Core `3547027` now
+acceptance **failed on that build**. Core `3547027` now
 drains accepted media, closes H.245 channels and exchanges EndSession before
 modem teardown. Automated delayed-transport tests cover either channel owner,
-simultaneous closure and bounded cleanup; they do not replace the physical
-Windows retest. The video delay and repeated encoder overload pauses remain
-documented client limitations; this result is not a latency acceptance.
+simultaneous closure and bounded cleanup. The corrected physical retest is
+recorded below; it does not erase the earlier failure.
+
+The corrected retest used the Windows native `preview-20261022-2` candidate and
+a Mac source application harness with the same frozen core `3547027` and client
+`812676b` runtime. It requested 60 seconds of Mac capture and recorded **65.10
+seconds**. Mac-side evidence reports actual 14,400 bps, 1,291 received audio
+frames and 129 received video AL-SDUs, with 64 decoded pictures and 589,440 bytes
+of decoded PCM. It recorded no session errors, active underruns, overruns or
+H.223 framing/reassembly errors.
+
+Mac sent and received EndSession, completed with
+`close.outcome="peer_end_received"`, stopped its transmitter and capture, and
+returned to idle without a forced shutdown. The subsequent modem restoration
+phase took **7.657 seconds**, confirmed cleanup and did not exceed its shared
+12-second budget. The Mac serial port was independently checked released. The
+maintainer separately confirmed that the Windows GUI returned to Idle, showed
+no error and stopped capture. The corrected Windows log has **not** been
+independently inspected, so its internal EndSession exchange and cleanup
+telemetry are not claimed here.
+
+The maintainer still reports **several seconds of audio/video delay**. Mac
+capture emitted 2,117 audio frames against 2,170 expected (approximately 97.6%),
+and only six outgoing video pictures, with 29 source video-budget pauses. Thus
+the corrected call establishes the observed disconnect recovery and continued
+media operation, not low latency, a sustained video frame rate or lossless live
+capture. Video delay and repeated encoder overload pauses remain unresolved
+client limitations. This short retest is separate from the earlier ten-minute
+soak; it is not another ten-minute result.
 
 Physical Linux modem and capture-device verification is **unverified** until
 hardware is available. Native launch and camera/microphone results belong to the
